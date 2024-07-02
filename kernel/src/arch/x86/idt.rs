@@ -1131,34 +1131,34 @@ impl Idtr {
 
 #[repr(C, align(16))]
 pub struct Idt {
-    divide_error: IdtEntry,
-    debug: IdtEntry,
-    non_maskable_interrupt: IdtEntry,
-    breakpoint: IdtEntry,
-    overflow: IdtEntry,
-    bound_range_exceeded: IdtEntry,
-    invalid_opcode: IdtEntry,
-    device_not_available: IdtEntry,
-    double_fault: IdtEntry,
-    coprocessor_segment_overrun: IdtEntry,
-    invalid_tss: IdtEntry,
-    segment_not_present: IdtEntry,
-    stack_segment_fault: IdtEntry,
-    general_protection_fault: IdtEntry,
-    page_fault: IdtEntry,
-    reserved_1: IdtEntry,
-    x87_floating_point: IdtEntry,
-    alignment_check: IdtEntry,
-    machine_check: IdtEntry,
-    simd_floating_point: IdtEntry,
-    virtualization: IdtEntry,
-    cp_protection_exception: IdtEntry,
-    reserved_2: [IdtEntry; 6],
-    hv_injection_exception: IdtEntry,
-    vmm_communication_exception: IdtEntry,
-    security_exception: IdtEntry,
-    reserved_3: IdtEntry,
-    interrupts: [IdtEntry; 224],
+    pub divide_error: IdtEntry,
+    pub debug: IdtEntry,
+    pub non_maskable_interrupt: IdtEntry,
+    pub breakpoint: IdtEntry,
+    pub overflow: IdtEntry,
+    pub bound_range_exceeded: IdtEntry,
+    pub invalid_opcode: IdtEntry,
+    pub device_not_available: IdtEntry,
+    pub double_fault: IdtEntry,
+    pub coprocessor_segment_overrun: IdtEntry,
+    pub invalid_tss: IdtEntry,
+    pub segment_not_present: IdtEntry,
+    pub stack_segment_fault: IdtEntry,
+    pub general_protection_fault: IdtEntry,
+    pub page_fault: IdtEntry,
+    pub reserved_1: IdtEntry,
+    pub x87_floating_point: IdtEntry,
+    pub alignment_check: IdtEntry,
+    pub machine_check: IdtEntry,
+    pub simd_floating_point: IdtEntry,
+    pub virtualization: IdtEntry,
+    pub cp_protection_exception: IdtEntry,
+    pub reserved_2: [IdtEntry; 6],
+    pub hv_injection_exception: IdtEntry,
+    pub vmm_communication_exception: IdtEntry,
+    pub security_exception: IdtEntry,
+    pub reserved_3: IdtEntry,
+    pub interrupts: [IdtEntry; 224],
 }
 
 impl Idt {
@@ -1905,29 +1905,7 @@ extern "C" fn syscall_handler(_frame: &ExceptionFrame, registers: &VolatileRegis
 
     match id {
         1 => {
-            let descriptor = rdi;
-            let buffer = rsi as *const u8;
-            let count = rdx;
-
-            let mut buffer_copied = [0u8; 512];
-
-            assert!(count < 512);
-
-            for i in 0..count as usize {
-                buffer_copied[i] = unsafe { *buffer.add(i) };
-            }
-
-            buffer_copied[count as usize] = 0;
-
-            use_kernel_page_table(|| {
-                info!("sys_write ({descriptor}, {buffer:p}, {count})");
-                info!(
-                    "{}",
-                    CStr::from_bytes_until_nul(&buffer_copied[..])
-                        .unwrap()
-                        .to_string_lossy()
-                );
-            });
+            write_syscall(rdi, rsi as *const u8, rdx);
         }
         _ => unimplemented!(),
     }
@@ -1943,4 +1921,27 @@ extern "C" fn unknown_interrupt_handler(frame: &ExceptionFrame, _registers: &Vol
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+extern "C" fn write_syscall(descriptor: u64, buffer: *const u8, count: u64) {
+    info!("sys_write ({descriptor}, {buffer:p}, {count})");
+
+    let mut buffer_copied = [0u8; 512];
+
+    assert!(count < 512);
+
+    for i in 0..count as usize {
+        buffer_copied[i] = unsafe { *buffer.add(i) };
+    }
+
+    buffer_copied[count as usize] = 0;
+
+    use_kernel_page_table(|| {
+        info!(
+            "{}",
+            CStr::from_bytes_until_nul(&buffer_copied[..])
+                .unwrap()
+                .to_string_lossy()
+        );
+    });
 }

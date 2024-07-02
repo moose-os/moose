@@ -4,7 +4,6 @@ use core::ops::{Index, IndexMut};
 use core::ptr;
 use limine::memory_map::EntryType;
 use limine::response::MemoryMapResponse;
-use log::LevelFilter;
 use snafu::Snafu;
 use spin::once::Once;
 use spin::RwLock;
