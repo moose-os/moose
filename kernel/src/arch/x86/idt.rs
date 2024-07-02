@@ -53,7 +53,7 @@ macro_rules! exception_handler {
                         pop rdx
                         pop rcx
                         pop rax
-                        
+
                         iretq
                     ",
                     sym $name
@@ -1892,14 +1892,51 @@ extern "C" fn security_exception_handler(
     }
 }
 
-extern "C" fn syscall_handler(_frame: &ExceptionFrame, registers: &VolatileRegisters) {
-    let rax = registers.rax as u64;
-    let rdi = registers.rdi as u64;
-    let rsi = registers.rsi as u64;
-    let rdx = registers.rdx as u64;
-    let _r10 = registers.r10 as u64;
-    let _r8 = registers.r8 as u64;
-    let _r9 = registers.r9 as u64;
+extern "x86-interrupt" fn syscall_handler(_interrupt_stack_frame: InterruptStackFrame) {
+    unsafe {
+        asm!(
+            "
+                push r9
+                push r8
+                push r10
+                push rdx
+                push rsi
+                push rdi
+                push rax
+            ",
+            options(nomem, preserves_flags)
+        );
+    }
+
+    let mut rax: u64;
+    let mut rdi: u64;
+    let mut rsi: u64;
+    let mut rdx: u64;
+    let mut r10: u64;
+    let mut r8: u64;
+    let mut r9: u64;
+
+    unsafe {
+        asm!(
+            "
+                pop {rax}
+                pop {rdi}
+                pop {rsi}
+                pop {rdx}
+                pop {r10}
+                pop {r8}
+                pop {r9}
+            ",
+            options(nomem, preserves_flags),
+            rax = out(reg) rax,
+            rdi = out(reg) rdi,
+            rsi = out(reg) rsi,
+            rdx = out(reg) rdx,
+            r10 = out(reg) r10,
+            r8 = out(reg) r8,
+            r9 = out(reg) r9,
+        );
+    }
 
     let id = rax;
 

@@ -5,8 +5,8 @@ use crate::cpu::ProcessorControlBlock;
 use crate::driver::pit::PIT;
 use crate::kernel::{kernel_ref, Kernel};
 use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress};
-use crate::process::{Registers, Status};
-use crate::scheduler::{self, TIMEOUT_QUEUE};
+use crate::process::Registers;
+use crate::scheduler;
 use crate::InterruptStack;
 use alloc::sync::Arc;
 use core::alloc::Layout;
@@ -18,7 +18,9 @@ use core::{
 };
 use log::info;
 use spin::RwLock;
-use x86_64::registers::control::{Cr4, Cr4Flags};
+use x86_64::registers::control::{Cr3, Cr3Flags, Cr4, Cr4Flags};
+use x86_64::structures::paging::{PhysFrame, Size4KiB};
+use x86_64::PhysAddr;
 
 pub const LOCAL_APIC_LAPIC_ID_REGISTER: u32 = 0x20;
 pub const LOCAL_APIC_LAPIC_VERSION_REGISTER: u32 = 0x23;
@@ -164,7 +166,6 @@ impl LocalApic {
     pub fn enable_timer(&self) {
         // Fire timer every 10ms
         let ticks_per_10ms = self.kernel.apic.read().local_apic_timer_ticks_per_second / 100;
-        self.kernel.apic.write().ms_per_tick = 10;
 
         // Enable interrupts
         self.write_register(LOCAL_APIC_TASK_PRIORITY_REGISTER, 0);
@@ -236,10 +237,11 @@ impl LocalApic {
     }
 }
 
-#[unsafe(naked)]
+#[naked]
 pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
-    naked_asm!(
-        "
+    unsafe {
+        naked_asm!(
+            "
                 sub rsp, {size}
 
                 mov [rsp + {rax_offset}], rax
@@ -311,47 +313,56 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 
                 iretq
             ",
-        size = const(mem::size_of::<Registers>()),
-        rax_offset = const(offset_of!(Registers, rax)),
-        rbx_offset = const(offset_of!(Registers, rbx)),
-        rcx_offset = const(offset_of!(Registers, rcx)),
-        rdx_offset = const(offset_of!(Registers, rdx)),
-        rsi_offset = const(offset_of!(Registers, rsi)),
-        rdi_offset = const(offset_of!(Registers, rdi)),
-        rbp_offset = const(offset_of!(Registers, rbp)),
-        rsp_offset = const(offset_of!(Registers, rsp)),
-        r8_offset = const(offset_of!(Registers, r8)),
-        r9_offset = const(offset_of!(Registers, r9)),
-        r10_offset = const(offset_of!(Registers, r10)),
-        r11_offset = const(offset_of!(Registers, r11)),
-        r12_offset = const(offset_of!(Registers, r12)),
-        r13_offset = const(offset_of!(Registers, r13)),
-        r14_offset = const(offset_of!(Registers, r14)),
-        r15_offset = const(offset_of!(Registers, r15)),
-        rip_offset = const(offset_of!(Registers, rip)),
-        rflags_offset = const(offset_of!(Registers, rflags)),
-        cs_offset = const(offset_of!(Registers, cs)),
-        ss_offset = const(offset_of!(Registers, ss)),
-        fs_offset = const(offset_of!(Registers, fs)),
-        gs_offset = const(offset_of!(Registers, gs)),
-        interrupt_stack_frame_rsp_offset = const(mem::size_of::<Registers>() + 24),
-        interrupt_stack_frame_rip_offset = const(mem::size_of::<Registers>()),
-        interrupt_stack_frame_rflags_offset = const(mem::size_of::<Registers>() + 16),
-        interrupt_stack_frame_cs_offset = const(mem::size_of::<Registers>() + 8),
-        interrupt_stack_frame_ss_offset = const(mem::size_of::<Registers>() + 32),
-    )
+            size = const(mem::size_of::<Registers>()),
+            rax_offset = const(offset_of!(Registers, rax)),
+            rbx_offset = const(offset_of!(Registers, rbx)),
+            rcx_offset = const(offset_of!(Registers, rcx)),
+            rdx_offset = const(offset_of!(Registers, rdx)),
+            rsi_offset = const(offset_of!(Registers, rsi)),
+            rdi_offset = const(offset_of!(Registers, rdi)),
+            rbp_offset = const(offset_of!(Registers, rbp)),
+            rsp_offset = const(offset_of!(Registers, rsp)),
+            r8_offset = const(offset_of!(Registers, r8)),
+            r9_offset = const(offset_of!(Registers, r9)),
+            r10_offset = const(offset_of!(Registers, r10)),
+            r11_offset = const(offset_of!(Registers, r11)),
+            r12_offset = const(offset_of!(Registers, r12)),
+            r13_offset = const(offset_of!(Registers, r13)),
+            r14_offset = const(offset_of!(Registers, r14)),
+            r15_offset = const(offset_of!(Registers, r15)),
+            rip_offset = const(offset_of!(Registers, rip)),
+            rflags_offset = const(offset_of!(Registers, rflags)),
+            cs_offset = const(offset_of!(Registers, cs)),
+            ss_offset = const(offset_of!(Registers, ss)),
+            fs_offset = const(offset_of!(Registers, fs)),
+            gs_offset = const(offset_of!(Registers, gs)),
+            interrupt_stack_frame_rsp_offset = const(mem::size_of::<Registers>() + 24),
+            interrupt_stack_frame_rip_offset = const(mem::size_of::<Registers>()),
+            interrupt_stack_frame_rflags_offset = const(mem::size_of::<Registers>() + 16),
+            interrupt_stack_frame_cs_offset = const(mem::size_of::<Registers>() + 8),
+            interrupt_stack_frame_ss_offset = const(mem::size_of::<Registers>() + 32),
+        )
+    }
 }
 
 #[no_mangle]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
-    scheduler::run(registers);
+    {
+        let current_thread = scheduler::current_thread();
+
+        *current_thread.0.registers.lock() = unsafe { (*registers).clone() };
+    }
+
+    scheduler::switch_execution();
+
+    let current_thread = scheduler::current_thread();
+
+    unsafe { *registers = current_thread.0.registers.lock().clone() };
+
+    let current_process = current_thread.process();
 
     use_kernel_page_table(|| unsafe {
-        let kernel = kernel_ref();
-
-        // Check if the timer bit is set in LAPIC's In-Service Register (ISR).
-        // True IRQs set this bit; manual calls (yield) do not.
-        let is_hw_interrupt = (*ProcessorControlBlock::get_pcb_for_current_processor())
+        (*ProcessorControlBlock::get_pcb_for_current_processor())
             .local_apic
             .get()
             .unwrap()
@@ -389,4 +400,13 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
                 .signal_end_of_interrupt();
         }
     });
+
+    {
+        let program_page_table_frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(
+            current_process.0.page_table_physical_address,
+        ))
+        .unwrap();
+
+        unsafe { Cr3::write(program_page_table_frame, Cr3Flags::empty()) };
+    }
 }

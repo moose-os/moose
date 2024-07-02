@@ -3,8 +3,9 @@ mod local_apic;
 
 pub use io_apic::*;
 pub use local_apic::*;
+use x86_64::VirtAddr;
 
-use crate::arch::x86::idt::{IdtEntry, IDT};
+use crate::arch::x86::idt::IDT;
 use crate::cpu::MAXIMUM_CPU_CORES;
 use crate::driver::acpi::{Acpi, MadtEntryInner};
 use crate::driver::pit::PIT;
@@ -18,7 +19,6 @@ use core::arch::asm;
 use core::ptr;
 use log::{debug, warn};
 use raw_cpuid::CpuId;
-use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 
 pub struct Apic {
@@ -38,11 +38,9 @@ impl Apic {
         );
 
         unsafe {
-            IDT.interrupts[timer_irq as usize - 32] =
-                IdtEntry::kernel_mode_ring3_accessible_interrupt(
-                    raw_timer_interrupt_handler as usize as u64,
-                );
-        }
+            IDT[timer_irq]
+                .set_handler_addr(VirtAddr::new(raw_timer_interrupt_handler as usize as u64))
+        };
 
         let io_apics = acpi
             .madt

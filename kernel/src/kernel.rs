@@ -1,24 +1,20 @@
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::mem;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::allocator::HEAP_START;
+use crate::arch::x86::gdt::TSS;
 use crate::driver::acpi::Acpi;
 use crate::driver::apic::Apic;
 use crate::linker::Linker;
-use crate::memory::{
-    current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress, PAGE_SIZE,
-};
-use crate::process::{
-    Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
-    HIGHEST_THREAD_PRIORITY,
-};
+use crate::memory::{current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress};
+use crate::process::{Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack};
 use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
-use spin::{Mutex, Once, RwLock};
+use spin::{Mutex, RwLock};
 use x86_64::registers::rflags;
 use x86_64::registers::segmentation::{Segment64, GS};
 use x86_64::structures::DescriptorTablePointer;

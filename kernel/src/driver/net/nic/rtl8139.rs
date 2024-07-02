@@ -3,7 +3,7 @@ use core::slice;
 use log::debug;
 use raw_cpuid::{CpuId, Hypervisor};
 use spin::Mutex;
-use x86_64::instructions::interrupts::without_interrupts;
+use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
 
 use crate::{
     arch::{
