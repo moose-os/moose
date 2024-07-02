@@ -2,7 +2,7 @@ use alloc::{boxed::Box, sync::Arc, vec};
 use core::slice;
 use log::debug;
 use raw_cpuid::{CpuId, Hypervisor};
-use spin::{Mutex, RwLock};
+use spin::Mutex;
 use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
 
 use crate::{
@@ -41,7 +41,7 @@ pub struct Rtl8139 {
 }
 
 impl Rtl8139 {
-    pub fn new(pci_device: Arc<Mutex<PciDevice>>, kernel: Arc<RwLock<Kernel>>) -> Rtl8139 {
+    pub fn new(pci_device: Arc<Mutex<PciDevice>>, kernel: Arc<Kernel>) -> Rtl8139 {
         let mut memory_manager = memory_manager().write();
 
         // We use 64kb ring buffer for RX buffer and want to map first page after the last one,
@@ -123,7 +123,6 @@ impl Rtl8139 {
                 let interrupt_line = pci_device.get_interrupt_line();
                 let irq = rtl8139
                     .kernel
-                    .read()
                     .irq_allocator
                     .lock()
                     .allocate_irq(IrqLevel::NetworkInterfaceCard);
@@ -153,7 +152,6 @@ impl Rtl8139 {
 
                 rtl8139
                     .kernel
-                    .read()
                     .apic
                     .read()
                     .redirect_interrupt(redirection_entry, interrupt_line);
@@ -283,7 +281,7 @@ struct Rtl8139Inner {
     rx_buffer: *mut u8,
     current_rx_offset: usize,
     current_tx_index: usize,
-    kernel: Arc<RwLock<Kernel>>,
+    kernel: Arc<Kernel>,
 }
 
 impl Rtl8139Inner {

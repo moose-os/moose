@@ -17,24 +17,20 @@ mod kernel;
 mod linker;
 mod logger;
 mod memory;
+mod process;
+mod scheduler;
 mod serial;
 mod terminal;
 mod vga;
 
 use crate::allocator::initialize_heap;
 use crate::driver::{pic::PIC, pit::PIT};
-use crate::memory::{
-    current_page_table, initialize_memory_manager, memory_manager, Page, PageFlags, PageTable,
-    VirtualAddress,
-};
+use crate::memory::initialize_memory_manager;
 use crate::terminal::Terminal;
-use alloc::boxed::Box;
 use alloc::sync::Arc;
-use allocator::HEAP_START;
 use arch::x86::gdt::{
     GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
     SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS, TSS_INDEX,
-    USER_MODE_CODE_SEGMENT_INDEX, USER_MODE_DATA_SEGMENT_INDEX,
 };
 use core::alloc::Layout;
 use core::arch::asm;
@@ -48,16 +44,12 @@ use limine::request::{
     RsdpRequest, StackSizeRequest,
 };
 use limine::BaseRevision;
-use linker::Linker;
 use log::{debug, error, info};
-use memory::{Frame, PAGE_SIZE};
 use raw_cpuid::CpuId;
+use scheduler::Scheduler;
 use spin::{Mutex, RwLock};
-use x86_64::instructions::tlb;
-use x86_64::registers::control::{Cr3, Cr3Flags, Cr4, Cr4Flags, Efer, EferFlags};
-use x86_64::structures::paging::{PhysFrame, Size4KiB};
+use x86_64::registers::control::{Cr3, Cr4, Cr4Flags, Efer, EferFlags};
 use x86_64::structures::tss::TaskStateSegment;
-use x86_64::PhysAddr;
 
 use crate::arch::irq::{IrqAllocator, IrqLevel};
 use crate::driver::acpi::{Acpi, Rsdp};
@@ -110,7 +102,7 @@ unsafe extern "C" fn _start() -> ! {
     assert!(STACK_SIZE_REQUEST.get_response().is_some());
 
     Efer::write(Efer::read() | EferFlags::NO_EXECUTE_ENABLE);
-    Cr4::write(Cr4::read() | Cr4Flags::PAGE_GLOBAL | Cr4Flags::FSGSBASE);
+    Cr4::write(Cr4::read() | Cr4Flags::PAGE_GLOBAL | Cr4Flags::PCID | Cr4Flags::FSGSBASE);
 
     KERNEL_PAGE_TABLE = Cr3::read().0.start_address().as_u64() as *const ();
 
@@ -197,7 +189,7 @@ unsafe extern "C" fn _start() -> ! {
     let devices = create_device_list();
 
     for device in &devices {
-        debug!("Device :{:#?}", device);
+        //debug!("Device :{:#?}", device);
     }
 
     info!("Waiting started");
@@ -219,14 +211,15 @@ unsafe extern "C" fn _start() -> ! {
     let acpi = Arc::new(Acpi::from_rsdp(rsdp_response.address() as *const Rsdp));
     let apic = Arc::new(RwLock::new(Apic::initialize(Arc::clone(&acpi), timer_irq)));
 
-    let kernel = Arc::new(RwLock::new(Kernel {
+    let kernel = Arc::new(Kernel::new(
         physical_memory_offset,
+        stack_pointer,
         acpi,
         apic,
-        gdt: x86_64::instructions::tables::sgdt(),
+        x86_64::instructions::tables::sgdt(),
         timer_irq,
-        irq_allocator: Arc::new(Mutex::new(irq_allocator)),
-    }));
+        Arc::new(Mutex::new(irq_allocator)),
+    ));
 
     let pci_devices = Pci::build_device_tree();
 
@@ -244,205 +237,28 @@ unsafe extern "C" fn _start() -> ! {
         });
 
     kernel
-        .read()
         .apic
         .read()
         .setup_other_application_processors(Arc::clone(&kernel), (*pcb).local_apic.get().unwrap());
 
     switch_to_post_boot_logger(serial, terminal);
 
-    (*pcb).local_apic.get().unwrap().enable_timer();
-
     info!("Entering user mode!");
 
-    static PROGRAM: &[u8] = include_bytes!("../../sandbox/target/x86_64-moose/release/sandbox");
+    static PROGRAM_1: &[u8] = include_bytes!("../../program1/target/x86_64-moose/release/program1");
+    static PROGRAM_2: &[u8] = include_bytes!("../../program2/target/x86_64-moose/release/program2");
 
-    start_program(
-        PROGRAM,
-        physical_memory_offset,
-        stack_pointer,
-        interrupt_stack,
-    );
-}
+    kernel.spawn_process(PROGRAM_1, interrupt_stack).unwrap();
+    kernel.spawn_process(PROGRAM_2, interrupt_stack).unwrap();
 
-pub fn start_program(
-    program: &[u8],
-    physical_memory_offset: u64,
-    kernel_stack: u64,
-    interrupt_stack: *mut InterruptStack,
-) -> ! {
-    let mut memory_manager = memory_manager().write();
+    (*pcb).local_apic.get().unwrap().enable_timer();
 
-    let stack = unsafe { alloc::alloc::alloc_zeroed(Layout::new::<ThreadStack>()) };
-
-    let program_page_table = Box::leak(Box::new(PageTable::new()));
-
-    // map kernel in program's address space
-    {
-        let kernel_virtual_base_address = KERNEL_ADDRESS_REQUEST
-            .get_response()
-            .unwrap()
-            .virtual_base();
-
-        let kernel_level_4_page_table_entry_index =
-            ((kernel_virtual_base_address >> 39) & 0b1_1111_1111) as usize;
-
-        let kernel_page_table = unsafe { current_page_table(physical_memory_offset) };
-
-        let level_4_page_table_entry =
-            &unsafe { &*kernel_page_table }[kernel_level_4_page_table_entry_index];
-
-        program_page_table[kernel_level_4_page_table_entry_index]
-            .set_address(level_4_page_table_entry.address());
-        program_page_table[kernel_level_4_page_table_entry_index]
-            .set_flags(level_4_page_table_entry.flags());
-    }
-
-    // map kernel's stack in program's address space
-    {
-        let kernel_page_table = unsafe { current_page_table(physical_memory_offset) };
-
-        let level_4_page_table_entry_index = ((kernel_stack >> 39) & 0b1_1111_1111) as usize;
-        let level_4_page_table_entry =
-            &unsafe { &*kernel_page_table }[level_4_page_table_entry_index];
-
-        program_page_table[level_4_page_table_entry_index]
-            .set_address(level_4_page_table_entry.address());
-        program_page_table[level_4_page_table_entry_index]
-            .set_flags(level_4_page_table_entry.flags());
-    }
-
-    // map kernel's heap in program's address space
-    {
-        let kernel_page_table = unsafe { current_page_table(physical_memory_offset) };
-
-        let level_4_page_table_entry_index = (HEAP_START >> 39) & 0b1_1111_1111;
-        let level_4_page_table_entry =
-            &unsafe { &*kernel_page_table }[level_4_page_table_entry_index];
-
-        program_page_table[level_4_page_table_entry_index]
-            .set_address(level_4_page_table_entry.address());
-        program_page_table[level_4_page_table_entry_index]
-            .set_flags(level_4_page_table_entry.flags());
-    }
-
-    // remap interrupt's stack in program's address space
-    for page_index in 0..(mem::size_of::<InterruptStack>() / PAGE_SIZE) as u64 {
-        let interrupt_stack_virtual_address =
-            VirtualAddress::new(interrupt_stack as u64 + (page_index * PAGE_SIZE as u64));
-        let interrupt_stack_physical_address = memory_manager
-            .translate_virtual_address_to_physical_for_current_address_space(
-                interrupt_stack_virtual_address,
-            )
-            .unwrap();
-
-        unsafe {
-            _ = memory_manager.unmap(
-                program_page_table,
-                &Page::new(interrupt_stack_virtual_address),
-            );
-
-            memory_manager
-                .map(
-                    program_page_table,
-                    &Page::new(interrupt_stack_virtual_address),
-                    &Frame::new(interrupt_stack_physical_address),
-                    PageFlags::WRITABLE,
-                )
-                .unwrap();
-        }
-    }
-
-    // FIXME: Handle linkage errors properly
-    let entry_point = Linker::link(program, &mut memory_manager, program_page_table).unwrap();
-
-    // map program's stack in program's address space
-    for page_index in 0..(mem::size_of::<ThreadStack>() / PAGE_SIZE) as u64 {
-        let stack_virtual_address =
-            VirtualAddress::new(stack as u64 + (page_index * PAGE_SIZE as u64));
-        let stack_physical_address = memory_manager
-            .translate_virtual_address_to_physical_for_current_address_space(stack_virtual_address)
-            .unwrap();
-
-        unsafe {
-            _ = memory_manager.unmap(program_page_table, &Page::new(stack_virtual_address));
-
-            memory_manager
-                .map(
-                    program_page_table,
-                    &Page::new(stack_virtual_address),
-                    &Frame::new(stack_physical_address),
-                    PageFlags::USER_MODE_ACCESSIBLE | PageFlags::WRITABLE,
-                )
-                .unwrap();
-        }
-    }
-
-    // switch page table
-    {
-        let program_page_table_physical_address = memory_manager
-            .translate_virtual_address_to_physical_for_current_address_space(VirtualAddress::new(
-                program_page_table as *const _ as u64,
-            ))
-            .unwrap()
-            .as_u64();
-
-        let program_page_table_frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(
-            program_page_table_physical_address,
-        ))
-        .unwrap();
-
-        unsafe { Cr3::write(program_page_table_frame, Cr3Flags::empty()) };
-
-        tlb::flush_all();
-    }
-
-    // We need to drop memory_manager manually because:
-    // > A noreturn asm block behaves just like a function which doesn't return; notably,
-    // > local variables in scope are not dropped before it is invoked.
-    drop(memory_manager);
-
-    enter_user_mode(entry_point as *const _, unsafe {
-        stack.add(mem::size_of::<ThreadStack>()).offset(-16)
-    });
+    Scheduler::run();
 }
 
 #[repr(C)]
 #[repr(align(4096))]
 pub struct InterruptStack([u8; 16 * 1024]);
-
-#[repr(C)]
-#[repr(align(4096))]
-struct ThreadStack([u8; 16 * 1024]);
-
-impl ThreadStack {
-    fn new() -> Self {
-        Self([0; 16 * 1024])
-    }
-}
-
-extern "C" fn enter_user_mode(program: *const u8, stack: *const u8) -> ! {
-    unsafe {
-        asm!(
-            "
-                mov ds, {data_segment_index_reg:r}
-                mov es, {data_segment_index_reg:r}
-                push ({data_segment_index} << 3) | 3
-                push {stack}
-                pushf
-                push ({code_segment_index} << 3) | 3
-                push {program}
-                iretq
-            ",
-            program = in(reg) program,
-            stack = in(reg) stack,
-            code_segment_index = const(USER_MODE_CODE_SEGMENT_INDEX as u8),
-            data_segment_index = const(USER_MODE_DATA_SEGMENT_INDEX as u8),
-            data_segment_index_reg = in(reg) (USER_MODE_DATA_SEGMENT_INDEX << 3) | 3,
-            options(nomem, noreturn)
-        );
-    };
-}
 
 #[panic_handler]
 fn rust_panic(info: &core::panic::PanicInfo) -> ! {

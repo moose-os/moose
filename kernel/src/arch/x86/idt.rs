@@ -637,14 +637,15 @@ extern "x86-interrupt" fn syscall_handler(_interrupt_stack_frame: InterruptStack
     unsafe {
         asm!(
             "
-            push r9
-            push r8
-            push r10
-            push rdx
-            push rsi
-            push rdi
-            push rax
-        "
+                push r9
+                push r8
+                push r10
+                push rdx
+                push rsi
+                push rdi
+                push rax
+            ",
+            options(nomem, preserves_flags)
         );
     }
 
@@ -666,7 +667,8 @@ extern "x86-interrupt" fn syscall_handler(_interrupt_stack_frame: InterruptStack
                 pop {r10}
                 pop {r8}
                 pop {r9}
-            ", 
+            ",
+            options(nomem, preserves_flags),
             rax = out(reg) rax,
             rdi = out(reg) rdi,
             rsi = out(reg) rsi,
@@ -681,29 +683,7 @@ extern "x86-interrupt" fn syscall_handler(_interrupt_stack_frame: InterruptStack
 
     match id {
         1 => {
-            let descriptor = rdi;
-            let buffer = rsi as *const u8;
-            let count = rdx;
-
-            let mut buffer_copied = [0u8; 512];
-
-            assert!(count < 512);
-
-            for i in 0..count as usize {
-                buffer_copied[i] = unsafe { *buffer.add(i) };
-            }
-
-            buffer_copied[count as usize] = 0;
-
-            use_kernel_page_table(|| {
-                info!("sys_write ({descriptor}, {buffer:p}, {count})");
-                info!(
-                    "{}",
-                    CStr::from_bytes_until_nul(&buffer_copied[..])
-                        .unwrap()
-                        .to_string_lossy()
-                );
-            });
+            write_syscall(rdi, rsi as *const u8, rdx);
         }
         _ => unimplemented!(),
     }
@@ -719,4 +699,27 @@ extern "x86-interrupt" fn unknown_interrupt_handler(interrupt_stack_frame: Inter
     loop {
         x86_64::instructions::hlt();
     }
+}
+
+extern "C" fn write_syscall(descriptor: u64, buffer: *const u8, count: u64) {
+    info!("sys_write ({descriptor}, {buffer:p}, {count})");
+
+    let mut buffer_copied = [0u8; 512];
+
+    assert!(count < 512);
+
+    for i in 0..count as usize {
+        buffer_copied[i] = unsafe { *buffer.add(i) };
+    }
+
+    buffer_copied[count as usize] = 0;
+
+    use_kernel_page_table(|| {
+        info!(
+            "{}",
+            CStr::from_bytes_until_nul(&buffer_copied[..])
+                .unwrap()
+                .to_string_lossy()
+        );
+    });
 }

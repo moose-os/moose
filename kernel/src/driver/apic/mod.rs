@@ -1,11 +1,11 @@
 mod io_apic;
 mod local_apic;
 
-use alloc::boxed::Box;
 pub use io_apic::*;
 pub use local_apic::*;
+use x86_64::VirtAddr;
 
-use crate::arch::x86::idt::register_interrupt_handler;
+use crate::arch::x86::idt::IDT;
 use crate::cpu::MAXIMUM_CPU_CORES;
 use crate::driver::acpi::{Acpi, MadtEntryInner};
 use crate::driver::pit::PIT;
@@ -19,7 +19,6 @@ use core::arch::asm;
 use core::ptr;
 use log::{debug, warn};
 use raw_cpuid::CpuId;
-use spin::RwLock;
 use x86_64::instructions::interrupts::without_interrupts;
 
 pub struct Apic {
@@ -37,7 +36,10 @@ impl Apic {
             "CPU does not support APIC"
         );
 
-        register_interrupt_handler(timer_irq, Box::new(|isf| timer_interrupt_handler(isf)));
+        unsafe {
+            IDT[timer_irq]
+                .set_handler_addr(VirtAddr::new(raw_timer_interrupt_handler as usize as u64))
+        };
 
         let io_apics = acpi
             .madt
@@ -77,11 +79,7 @@ impl Apic {
         );
     }
 
-    pub fn setup_other_application_processors(
-        &self,
-        kernel: Arc<RwLock<Kernel>>,
-        local_apic: &LocalApic,
-    ) {
+    pub fn setup_other_application_processors(&self, kernel: Arc<Kernel>, local_apic: &LocalApic) {
         let args = unsafe {
             // Map 0x8000 into memory. This shouldn't be mapped currently.
             let mut memory_manager = memory_manager().write();
