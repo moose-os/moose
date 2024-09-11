@@ -4,11 +4,12 @@ use core::mem;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::allocator::HEAP_START;
-use crate::arch::x86::gdt::TSS;
 use crate::driver::acpi::Acpi;
 use crate::driver::apic::Apic;
 use crate::linker::Linker;
-use crate::memory::{current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress};
+use crate::memory::{
+    current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress, PAGE_SIZE,
+};
 use crate::process::{Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack};
 use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
@@ -73,7 +74,7 @@ impl Kernel {
 
         // remap program's stack in program's address space
         {
-            for page_index in 0..4 {
+            for page_index in 0..(mem::size_of::<ThreadStack>() / PAGE_SIZE) as u64 {
                 let stack_virtual_address = VirtualAddress::new(stack as u64 + (page_index * 4096));
                 let stack_physical_address = memory_manager
                     .translate_virtual_address_to_physical_for_current_address_space(
