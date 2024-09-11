@@ -1,7 +1,7 @@
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::mem;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::allocator::HEAP_START;
 use crate::driver::acpi::Acpi;
@@ -15,7 +15,7 @@ use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
-use spin::{Mutex, RwLock};
+use spin::{Mutex, Once, RwLock};
 use x86_64::registers::rflags;
 use x86_64::registers::segmentation::{Segment64, GS};
 use x86_64::structures::DescriptorTablePointer;

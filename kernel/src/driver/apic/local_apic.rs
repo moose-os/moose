@@ -345,6 +345,10 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 
 #[no_mangle]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
+    let kernel = kernel_ref();
+
+    kernel.ticks.fetch_add(1, Ordering::SeqCst);
+
     scheduler::run(registers);
 
     use_kernel_page_table(|| unsafe {

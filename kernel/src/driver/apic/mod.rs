@@ -3,6 +3,7 @@ mod local_apic;
 
 pub use io_apic::*;
 pub use local_apic::*;
+use spin::Mutex;
 use x86_64::VirtAddr;
 
 use crate::arch::x86::idt::IDT;
