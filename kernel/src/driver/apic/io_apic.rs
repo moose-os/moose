@@ -93,6 +93,8 @@ impl IoApic {
     }
 }
 
+unsafe impl Send for IoApic {}
+
 #[bitfield(u64)]
 pub struct RedirectionEntry {
     pub interrupt_vector: u8,

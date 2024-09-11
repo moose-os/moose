@@ -18,12 +18,13 @@ use core::arch::asm;
 use core::ptr;
 use log::{debug, warn};
 use raw_cpuid::CpuId;
+use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 
 pub struct Apic {
     pub local_apic_timer_ticks_per_second: u64,
     pub acpi: Arc<Acpi>,
-    io_apics: Vec<IoApic>,
+    io_apics: Vec<Mutex<IoApic>>,
 }
 
 impl Apic {
@@ -50,7 +51,7 @@ impl Apic {
                 MadtEntryInner::IoApic(io_apic) => Some(io_apic),
                 _ => None,
             })
-            .map(|entry| IoApic::new(entry.clone()))
+            .map(|entry| Mutex::new(IoApic::new(entry.clone())))
             .collect();
 
         Apic {
@@ -61,18 +62,19 @@ impl Apic {
     }
 
     pub fn redirect_interrupt(&self, redirection_entry: RedirectionEntry, irq: u8) {
-        let io_apic: IoApic = self
+        let io_apic = self
             .io_apics
-            .clone()
-            .into_iter()
-            .filter(|apic| {
+            .iter()
+            .find(|apic| {
+                let apic = apic.lock();
                 let start = apic.madt_io_apic.global_system_interrupt_base;
                 let end = start + apic.get_redirection_entry_count();
 
                 (start..end).contains(&(irq as u32))
             })
-            .next()
             .unwrap();
+
+        let io_apic = io_apic.lock();
 
         io_apic.redirect_interrupt(
             redirection_entry,
