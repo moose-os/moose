@@ -8,7 +8,7 @@ use x86_64::{
     PhysAddr,
 };
 
-use crate::process::{Thread, ThreadStack};
+use crate::process::{Registers, Thread, ThreadStack};
 
 static SCHEDULER: Scheduler = Scheduler::new();
 
@@ -61,16 +61,20 @@ pub fn schedule(thread: Thread) {
     SCHEDULER.queue.lock().push_back(thread);
 }
 
-pub fn switch_execution() {
-    let mut queue = SCHEDULER.queue.lock();
+pub fn run(registers: *mut Registers) {
+    save_registers(registers);
+    schedule_next_thread();
+    restore_registers(registers);
 
-    if queue.is_empty() {
-        return;
-    }
+    let current_thread = current_thread();
+    let current_process = current_thread.process();
 
-    let thread = queue.pop_front().unwrap();
+    let program_page_table_frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(
+        current_process.0.page_table_physical_address,
+    ))
+    .unwrap();
 
-    queue.push_back(thread);
+    unsafe { Cr3::write(program_page_table_frame, Cr3Flags::empty()) };
 }
 
 pub fn unschedule(thread: &Thread) {
@@ -90,6 +94,30 @@ pub fn unschedule(thread: &Thread) {
     if let Some(index) = index {
         queue.remove(index);
     }
+}
+
+fn save_registers(registers: *const Registers) {
+    let current_thread = current_thread();
+
+    *current_thread.0.registers.lock() = unsafe { (*registers).clone() };
+}
+
+fn restore_registers(registers: *mut Registers) {
+    let current_thread = current_thread();
+
+    unsafe { *registers = current_thread.0.registers.lock().clone() };
+}
+
+fn schedule_next_thread() {
+    let mut queue = SCHEDULER.queue.lock();
+
+    if queue.is_empty() {
+        return;
+    }
+
+    let thread = queue.pop_front().unwrap();
+
+    queue.push_back(thread);
 }
 
 extern "C" fn enter_user_mode(program: *const u8, stack: *const u8) -> ! {

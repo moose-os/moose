@@ -17,9 +17,7 @@ use core::{
 };
 use log::info;
 use spin::RwLock;
-use x86_64::registers::control::{Cr3, Cr3Flags, Cr4, Cr4Flags};
-use x86_64::structures::paging::{PhysFrame, Size4KiB};
-use x86_64::PhysAddr;
+use x86_64::registers::control::{Cr4, Cr4Flags};
 
 pub const LOCAL_APIC_LAPIC_ID_REGISTER: u32 = 0x20;
 pub const LOCAL_APIC_LAPIC_VERSION_REGISTER: u32 = 0x23;
@@ -335,19 +333,7 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 
 #[no_mangle]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
-    {
-        let current_thread = scheduler::current_thread();
-
-        *current_thread.0.registers.lock() = unsafe { (*registers).clone() };
-    }
-
-    scheduler::switch_execution();
-
-    let current_thread = scheduler::current_thread();
-
-    unsafe { *registers = current_thread.0.registers.lock().clone() };
-
-    let current_process = current_thread.process();
+    scheduler::run(registers);
 
     use_kernel_page_table(|| unsafe {
         (*ProcessorControlBlock::get_pcb_for_current_processor())
@@ -356,13 +342,4 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
             .unwrap()
             .signal_end_of_interrupt();
     });
-
-    {
-        let program_page_table_frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(
-            current_process.0.page_table_physical_address,
-        ))
-        .unwrap();
-
-        unsafe { Cr3::write(program_page_table_frame, Cr3Flags::empty()) };
-    }
 }

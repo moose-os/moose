@@ -190,7 +190,7 @@ unsafe extern "C" fn _start() -> ! {
     let devices = create_device_list();
 
     for device in &devices {
-        //debug!("Device :{:#?}", device);
+        debug!("Device :{:#?}", device);
     }
 
     info!("Waiting started");
