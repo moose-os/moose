@@ -1,7 +1,7 @@
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::mem;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 use crate::allocator::HEAP_START;
 use crate::driver::acpi::Acpi;
@@ -15,10 +15,12 @@ use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
-use spin::{Mutex, RwLock};
+use spin::{Mutex, Once, RwLock};
 use x86_64::registers::rflags;
 use x86_64::registers::segmentation::{Segment64, GS};
 use x86_64::structures::DescriptorTablePointer;
+
+static KERNEL: Once<Arc<Kernel>> = Once::new();
 
 pub struct Kernel {
     pub physical_memory_offset: u64,
@@ -28,6 +30,7 @@ pub struct Kernel {
     pub gdt: DescriptorTablePointer,
     pub timer_irq: u8,
     pub irq_allocator: Arc<Mutex<IrqAllocator>>,
+    pub ticks: AtomicU64,
     current_usable_process_id: AtomicUsize,
     current_usable_thread_id: AtomicUsize,
     processes: RwLock<Vec<Process>>,
@@ -51,6 +54,7 @@ impl Kernel {
             gdt,
             timer_irq,
             irq_allocator,
+            ticks: AtomicU64::new(0),
             current_usable_process_id: AtomicUsize::new(0),
             current_usable_thread_id: AtomicUsize::new(0),
             processes: RwLock::new(Vec::new()),
@@ -236,4 +240,16 @@ impl Kernel {
 
         page_table
     }
+}
+
+pub fn kernel() -> Arc<Kernel> {
+    Arc::clone(KERNEL.get().unwrap())
+}
+
+pub fn kernel_ref<'a>() -> &'a Kernel {
+    KERNEL.get().unwrap()
+}
+
+pub(crate) fn set_kernel(kernel: Arc<Kernel>) {
+    KERNEL.call_once(|| kernel);
 }

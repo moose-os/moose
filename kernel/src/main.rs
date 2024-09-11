@@ -38,6 +38,7 @@ use core::ptr::addr_of;
 use core::{mem, ptr};
 use driver::acpi::{create_device_list, initialize_acpica};
 use driver::net::nic::rtl8139::Rtl8139;
+use kernel::set_kernel;
 use limine::paging::Mode;
 use limine::request::{
     FramebufferRequest, HhdmRequest, KernelAddressRequest, MemoryMapRequest, PagingModeRequest,
@@ -220,6 +221,8 @@ unsafe extern "C" fn _start() -> ! {
         timer_irq,
         Arc::new(Mutex::new(irq_allocator)),
     ));
+
+    set_kernel(Arc::clone(&kernel));
 
     let pci_devices = Pci::build_device_tree();
 
