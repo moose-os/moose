@@ -1,6 +1,9 @@
-use crate::memory::PageTable;
+use crate::{memory::PageTable, scheduler};
 use alloc::{sync::Arc, vec::Vec};
-use core::{ffi::c_void, sync::atomic::AtomicUsize};
+use core::{
+    ffi::c_void,
+    sync::atomic::{AtomicBool, AtomicUsize},
+};
 use spin::{Mutex, MutexGuard};
 
 static CURRENT_USABLE_PROCESS_ID: AtomicUsize = AtomicUsize::new(0);
@@ -47,8 +50,36 @@ impl Thread {
         self.0.id
     }
 
-    pub fn status(&self) -> &Status {
-        &self.0.status
+    pub fn status(&self) -> Status {
+        *self.0.status.lock()
+    }
+
+    pub fn set_status(&self, status: Status) {
+        let mut current_status = self.0.status.lock();
+
+        if *current_status == status {
+            return;
+        }
+
+        match *current_status {
+            Status::Running => match status {
+                Status::Stopped => scheduler::unschedule(self),
+                Status::Waiting { timeout: _ } => scheduler::unschedule(self),
+                _ => {}
+            },
+            Status::Stopped => {
+                if status == Status::Running {
+                    scheduler::schedule(self.clone());
+                }
+            }
+            Status::Waiting { timeout: _ } => {
+                if status == Status::Running {
+                    scheduler::schedule(self.clone());
+                }
+            }
+        }
+
+        *current_status = status;
     }
 
     pub(crate) fn entry(&self) -> *const c_void {
@@ -63,15 +94,17 @@ impl Thread {
 pub(crate) struct ThreadInner {
     pub(crate) process: Process,
     pub(crate) id: ThreadId,
-    pub(crate) status: Status,
+    pub(crate) status: Mutex<Status>,
     pub(crate) entry: *const c_void,
     pub(crate) registers: Mutex<Registers>,
     pub(crate) stack: *mut ThreadStack,
+    pub(crate) reschedule: AtomicBool,
 }
 
 unsafe impl Send for ThreadInner {}
 unsafe impl Sync for ThreadInner {}
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Status {
     Running,
     Stopped,
