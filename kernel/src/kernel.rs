@@ -10,7 +10,10 @@ use crate::linker::Linker;
 use crate::memory::{
     current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress, PAGE_SIZE,
 };
-use crate::process::{Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack};
+use crate::process::{
+    Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
+    HIGHEST_THREAD_PRIORITY,
+};
 use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
 use alloc::vec::Vec;
