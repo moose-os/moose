@@ -45,8 +45,9 @@ impl Kernel {
         gdt: DescriptorTablePointer,
         timer_irq: u8,
         irq_allocator: Arc<Mutex<IrqAllocator>>,
+        kernel_page_table: *mut PageTable,
     ) -> Self {
-        Self {
+        let kernel = Self {
             physical_memory_offset,
             bsp_stack,
             acpi,
@@ -58,7 +59,35 @@ impl Kernel {
             current_usable_process_id: AtomicUsize::new(0),
             current_usable_thread_id: AtomicUsize::new(0),
             processes: RwLock::new(Vec::new()),
-        }
+        };
+
+        let mut processes = kernel.processes.write();
+
+        let process_id = kernel
+            .current_usable_process_id
+            .fetch_add(1, Ordering::SeqCst);
+
+        let page_table_physical_address = {
+            let memory_manager = memory_manager().read();
+
+            memory_manager
+                .translate_virtual_address_to_physical_for_current_address_space(
+                    VirtualAddress::new(kernel_page_table as u64),
+                )
+                .unwrap()
+                .as_u64()
+        };
+
+        processes.push(Process(Arc::new(ProcessInner {
+            id: process_id,
+            page_table: kernel_page_table,
+            page_table_physical_address,
+            threads: Mutex::new(Vec::new()),
+        })));
+
+        drop(processes);
+
+        kernel
     }
 
     pub fn spawn_process(
@@ -140,6 +169,7 @@ impl Kernel {
                 ..Default::default()
             }),
             stack,
+            is_kernel_mode: false,
             reschedule: AtomicBool::new(true),
         }));
 
@@ -150,6 +180,40 @@ impl Kernel {
         scheduler::schedule(thread);
 
         Ok(process)
+    }
+
+    pub fn spawn_kernel_thread(&self, entry_point: extern "C" fn() -> !) -> Thread {
+        let kernel_process = self.processes.read().first().unwrap().clone();
+
+        let thread_id = self.current_usable_thread_id.fetch_add(1, Ordering::SeqCst);
+
+        let stack =
+            unsafe { alloc::alloc::alloc_zeroed(Layout::new::<ThreadStack>()) } as *mut ThreadStack;
+
+        let thread = Thread(Arc::new(ThreadInner {
+            process: kernel_process.clone(),
+            id: thread_id,
+            status: Mutex::new(Status::Running),
+            entry: entry_point as *const c_void,
+            registers: Mutex::new(Registers {
+                rip: entry_point as usize as u64,
+                rsp: stack as u64 + mem::size_of::<ThreadStack>() as u64 - 16,
+                cs: (5 << 3) | 3,
+                ss: (6 << 3) | 3,
+                gs: GS::read_base().as_u64(),
+                rflags: rflags::read_raw(),
+                ..Default::default()
+            }),
+            stack,
+            is_kernel_mode: true,
+            reschedule: AtomicBool::new(true),
+        }));
+
+        kernel_process.0.threads.lock().push(thread.clone());
+
+        scheduler::schedule(thread.clone());
+
+        thread
     }
 
     pub fn create_address_space(

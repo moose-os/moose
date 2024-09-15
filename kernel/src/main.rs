@@ -45,6 +45,7 @@ use limine::request::{
 };
 use limine::BaseRevision;
 use log::{debug, error, info};
+use memory::{memory_manager, Frame, PageFlags, PageTable, PhysicalAddress};
 use raw_cpuid::CpuId;
 use scheduler::Scheduler;
 use spin::{Mutex, RwLock};
@@ -90,7 +91,8 @@ static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(
 #[used]
 static KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest::new();
 
-static mut KERNEL_PAGE_TABLE: *const () = ptr::null();
+static mut KERNEL_PAGE_TABLE: *mut PageTable = ptr::null_mut();
+static mut KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS: u64 = 0;
 
 #[no_mangle]
 unsafe extern "C" fn _start() -> ! {
@@ -104,7 +106,7 @@ unsafe extern "C" fn _start() -> ! {
     Efer::write(Efer::read() | EferFlags::NO_EXECUTE_ENABLE);
     Cr4::write(Cr4::read() | Cr4Flags::PAGE_GLOBAL | Cr4Flags::PCID | Cr4Flags::FSGSBASE);
 
-    KERNEL_PAGE_TABLE = Cr3::read().0.start_address().as_u64() as *const ();
+    KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS = Cr3::read().0.start_address().as_u64();
 
     asm!("cli", options(nostack, nomem));
 
@@ -147,6 +149,22 @@ unsafe extern "C" fn _start() -> ! {
     initialize_memory_manager(frame_allocator, physical_memory_offset);
 
     initialize_heap().expect("Failed to initialize heap");
+
+    {
+        let page_table_virtual_address = {
+            let mut memory_manager = memory_manager().write();
+
+            unsafe {
+                memory_manager.map_any_for_current_address_space(
+                    &Frame::new(PhysicalAddress::new(KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS)),
+                    PageFlags::empty(),
+                )
+            }
+            .address()
+        };
+
+        KERNEL_PAGE_TABLE = page_table_virtual_address.as_mut_ptr();
+    }
 
     let serial = Arc::new(Mutex::new(SerialPort::COM1.open().unwrap()));
 
@@ -221,6 +239,7 @@ unsafe extern "C" fn _start() -> ! {
         x86_64::instructions::tables::sgdt(),
         timer_irq,
         Arc::new(Mutex::new(irq_allocator)),
+        KERNEL_PAGE_TABLE,
     ));
 
     set_kernel(Arc::clone(&kernel));
@@ -247,7 +266,7 @@ unsafe extern "C" fn _start() -> ! {
 
     switch_to_post_boot_logger(serial, terminal);
 
-    info!("Entering user mode!");
+    info!("Scheduling");
 
     static PROGRAM_1: &[u8] = include_bytes!("../../program1/target/x86_64-moose/release/program1");
     static PROGRAM_2: &[u8] = include_bytes!("../../program2/target/x86_64-moose/release/program2");

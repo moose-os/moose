@@ -59,13 +59,23 @@ impl Scheduler {
         let entry = thread.entry();
         let stack = thread.stack();
 
+        let is_kernel_mode = thread.is_kernel_mode();
+
         drop(thread);
 
-        enter_user_mode(entry as *const _, unsafe {
-            (stack as *const u8)
-                .add(mem::size_of::<ThreadStack>())
-                .offset(-16)
-        });
+        if is_kernel_mode {
+            enter_kernel_mode(entry as *const _, unsafe {
+                (stack as *const u8)
+                    .add(mem::size_of::<ThreadStack>())
+                    .offset(-16)
+            });
+        } else {
+            enter_user_mode(entry as *const _, unsafe {
+                (stack as *const u8)
+                    .add(mem::size_of::<ThreadStack>())
+                    .offset(-16)
+            });
+        }
     }
 }
 
@@ -189,6 +199,29 @@ fn schedule_next_thread() {
     let next_thread = execution_queue.pop_front().unwrap();
 
     *current_thread = Some(next_thread);
+}
+
+extern "C" fn enter_kernel_mode(program: *const u8, stack: *const u8) -> ! {
+    unsafe {
+        asm!(
+            "
+                mov ds, {data_segment:r}
+                mov es, {data_segment:r}
+
+                push 6 << 3
+                push {stack}
+                pushf
+                push 5 << 3
+                push {program}
+
+                iretq
+            ",
+            data_segment = in(reg) 6 << 3,
+            program = in(reg) program,
+            stack = in(reg) stack,
+            options(noreturn)
+        );
+    };
 }
 
 extern "C" fn enter_user_mode(program: *const u8, stack: *const u8) -> ! {
