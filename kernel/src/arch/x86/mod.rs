@@ -10,7 +10,7 @@ use x86_64::{
     PhysAddr,
 };
 
-use crate::KERNEL_PAGE_TABLE;
+use crate::KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS;
 
 pub fn perform_arch_initialization() {
     unsafe {
@@ -35,8 +35,10 @@ pub fn use_kernel_page_table(closure: impl FnOnce()) {
 
     unsafe {
         Cr3::write(
-            PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(KERNEL_PAGE_TABLE as u64))
-                .unwrap(),
+            PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(
+                KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS,
+            ))
+            .unwrap(),
             Cr3Flags::empty(),
         );
 

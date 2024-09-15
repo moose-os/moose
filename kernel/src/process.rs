@@ -89,6 +89,10 @@ impl Thread {
     pub(crate) fn stack(&self) -> *mut ThreadStack {
         self.0.stack
     }
+
+    pub(crate) fn is_kernel_mode(&self) -> bool {
+        self.0.is_kernel_mode
+    }
 }
 
 pub(crate) struct ThreadInner {
@@ -98,6 +102,7 @@ pub(crate) struct ThreadInner {
     pub(crate) entry: *const c_void,
     pub(crate) registers: Mutex<Registers>,
     pub(crate) stack: *mut ThreadStack,
+    pub(crate) is_kernel_mode: bool,
     pub(crate) reschedule: AtomicBool,
 }
 
