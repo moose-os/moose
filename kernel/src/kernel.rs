@@ -1,7 +1,7 @@
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::mem;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::allocator::HEAP_START;
 use crate::driver::acpi::Acpi;
@@ -128,7 +128,7 @@ impl Kernel {
         let thread = Thread(Arc::new(ThreadInner {
             process: process.clone(),
             id: thread_id,
-            status: Status::Stopped,
+            status: Mutex::new(Status::Running),
             entry: entry_point as *const c_void,
             registers: Mutex::new(Registers {
                 rip: entry_point,
@@ -140,6 +140,7 @@ impl Kernel {
                 ..Default::default()
             }),
             stack,
+            reschedule: AtomicBool::new(true),
         }));
 
         process.0.threads.lock().push(thread.clone());
