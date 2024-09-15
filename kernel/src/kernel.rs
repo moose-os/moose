@@ -1,7 +1,7 @@
 use core::alloc::Layout;
 use core::ffi::c_void;
 use core::mem;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::allocator::HEAP_START;
 use crate::driver::acpi::Acpi;
