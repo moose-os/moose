@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc, vec};
+use alloc::{boxed::Box, sync::Arc, vec::{self, Vec}};
 use core::slice;
 use log::debug;
 use raw_cpuid::{CpuId, Hypervisor};
@@ -15,11 +15,10 @@ use crate::{
     },
     cpu::ProcessorControlBlock,
     driver::{
-        apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode},
-        pci::PciDevice,
+        apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode}, io::{device_manager::DeviceRef, Device, DriverBase, DriverError, DriverPredicate, NetworkDriver, NetworkState}, pci::PciDevice
     },
     kernel::Kernel,
-    memory::{memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE},
+    memory::{memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE}, network_driver,
 };
 
 const BUFE_BIT: u8 = 0x1;
@@ -36,6 +35,50 @@ const CONFIG_1_REGISTER: u16 = 0x52;
 const RX_RING_BUFFER_SIZE: usize = 65536;
 const RX_BUFFER_SIZE: usize = RX_RING_BUFFER_SIZE + 1518 + 4 + 4;
 
+
+
+#[derive(Debug)]
+pub struct Rtl8139Driver {}
+
+impl DriverBase for Rtl8139Driver {
+    fn attach(&self, device: DeviceRef) -> Result<(), DriverError> {
+        todo!()
+    }
+
+    fn detach(&self, device: DeviceRef) -> Result<(), DriverError> {
+        todo!()
+    }
+
+    fn supported_devices(&self) -> Result<DriverPredicate, DriverError> {
+        Ok(DriverPredicate::PciDeviceAndVendorId { vendor_id: 0x10EC, device_id: 0x8139 })
+    }
+}
+
+impl NetworkDriver for Rtl8139Driver {
+    fn supports_network_capabilities(&self) -> bool {
+        true
+    }
+
+    fn send_packet(&self, device: &Device, packet: &[u8]) -> Result<(), DriverError> {
+        panic!("Unsupported operation");
+    }
+
+    fn receive_packet(&self, device: &Device) -> Result<Option<Vec<u8>>, DriverError> {
+        panic!("Unsupported operation");
+    }
+
+    fn mac_address(&self, device: &Device) -> [u8; 6] {
+        panic!("Unsupported operation");
+    }
+
+    fn set_state(&self, device: &Device, state: NetworkState) -> Result<(), DriverError> {
+        panic!("Unsupported operation");
+    }
+}
+
+network_driver!(Rtl8139Driver);
+
+
 pub struct Rtl8139 {
     inner: Arc<Mutex<Rtl8139Inner>>,
 }
@@ -49,7 +92,7 @@ impl Rtl8139 {
         //
         // 64kb occupies 16 physical pages.
         // We allocate them manually as we need to explicilty have 16 **physically contiguous** pages.
-        let mut frames = vec![];
+        let mut frames = alloc::vec![];
 
         for _ in 0..(RX_RING_BUFFER_SIZE / PAGE_SIZE) {
             frames.push(memory_manager.allocate_frame().unwrap());

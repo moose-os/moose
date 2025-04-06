@@ -31,6 +31,8 @@ pic8259 = { version = "0.11.0", default-features = false }
 limine = { version = "0.4.0", default-features = false }
 
 acpica-rs = { git = "https://github.com/moose-os/acpica-rs" }
+phf = { version = "0.11", features = ["macros"], default-features = false }
+hashbrown = "0.15.2"
 
 [profile.dev]
 opt-level = 1
