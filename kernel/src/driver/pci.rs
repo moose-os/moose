@@ -3,6 +3,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 use log::debug;
 
+use super::io::PciAddress;
+
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;
 
@@ -19,9 +21,9 @@ impl Pci {
     fn perform_brute_force_scan() -> Vec<PciDevice> {
         let mut devices = vec![];
 
-        for bus in 0..256 {
-            for device in 0..32 {
-                for function in 0..8 {
+        for bus in 0..256u16 {
+            for device in 0..32u16 {
+                for function in 0..8u16 {
                     // @TODO: Make tree-like structure of detected
                     // devices in system (not only on PCI bus ofc, maybe use some AML and ACPI tables?)
                     if let Some(dev) = Pci::scan_device(bus, device, function) {
@@ -34,7 +36,7 @@ impl Pci {
         devices
     }
 
-    fn scan_device(bus: u32, device: u32, function: u32) -> Option<PciDevice> {
+    pub fn scan_device(bus: u16, device: u16, function: u16) -> Option<PciDevice> {
         let vendor_id = Pci::read_u16(bus, device, function, 0);
         if vendor_id == 0xFFFF {
             // Device does not exist
@@ -45,9 +47,11 @@ impl Pci {
         let class_code = Pci::read_u16(bus, device, function, 10) >> 8;
         let subclass_code = Pci::read_u16(bus, device, function, 10) & 0xF;
         let device = PciDevice {
-            bus,
-            device,
-            function,
+            address: PciAddress {
+                bus,
+                device,
+                function,
+            },
             vendor_id,
             device_id,
             class: PciDeviceClass::parse(class_code as u32, subclass_code as u32),
@@ -65,49 +69,67 @@ impl Pci {
         Some(device)
     }
 
-    pub fn read_u8(bus: u32, device: u32, function: u32, offset: u32) -> u8 {
-        let address: u32 =
-            (bus << 16) | (device << 11) | (function << 8) | (offset & 0xFC) | 0x80000000;
+    pub fn read_u8(bus: u16, device: u16, function: u16, offset: u32) -> u8 {
+        let address: u32 = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | (offset & 0xFC)
+            | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
         ((inl(CONFIG_DATA) >> ((offset & 2) * 8)) & 0xFF) as u8
     }
 
-    pub fn read_u16(bus: u32, device: u32, function: u32, offset: u32) -> u16 {
-        let address: u32 =
-            (bus << 16) | (device << 11) | (function << 8) | (offset & 0xFC) | 0x80000000;
+    pub fn read_u16(bus: u16, device: u16, function: u16, offset: u32) -> u16 {
+        let address: u32 = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | (offset & 0xFC)
+            | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
         ((inl(CONFIG_DATA) >> ((offset & 2) * 8)) & 0xFFFF) as u16
     }
 
-    pub fn read_u32(bus: u32, device: u32, function: u32, offset: u32) -> u32 {
-        let address: u32 =
-            (bus << 16) | (device << 11) | (function << 8) | (offset & 0xFC) | 0x80000000;
+    pub fn read_u32(bus: u16, device: u16, function: u16, offset: u32) -> u32 {
+        let address: u32 = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | (offset & 0xFC)
+            | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
         inl(CONFIG_DATA) >> ((offset & 2) * 8)
     }
 
-    pub fn write_u8(bus: u32, device: u32, function: u32, offset: u32, value: u8) {
-        let address: u32 =
-            (bus << 16) | (device << 11) | (function << 8) | (offset & 0xFC) | 0x80000000;
+    pub fn write_u8(bus: u16, device: u16, function: u16, offset: u32, value: u8) {
+        let address: u32 = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | (offset & 0xFC)
+            | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
         outl(CONFIG_DATA, value as u32);
     }
 
-    pub fn write_u16(bus: u32, device: u32, function: u32, offset: u32, value: u16) {
-        let address: u32 =
-            (bus << 16) | (device << 11) | (function << 8) | (offset & 0xFC) | 0x80000000;
+    pub fn write_u16(bus: u16, device: u16, function: u16, offset: u32, value: u16) {
+        let address: u32 = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | (offset & 0xFC)
+            | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
         outl(CONFIG_DATA, value as u32);
     }
 
-    pub fn write_u32(bus: u32, device: u32, function: u32, offset: u32, value: u32) {
-        let address: u32 =
-            (bus << 16) | (device << 11) | (function << 8) | (offset & 0xFC) | 0x80000000;
+    pub fn write_u32(bus: u16, device: u16, function: u16, offset: u32, value: u32) {
+        let address: u32 = ((bus as u32) << 16)
+            | ((device as u32) << 11)
+            | ((function as u32) << 8)
+            | (offset & 0xFC)
+            | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
         outl(CONFIG_DATA, value);
@@ -115,9 +137,7 @@ impl Pci {
 }
 
 pub struct PciDevice {
-    bus: u32,
-    device: u32,
-    function: u32,
+    pub address: PciAddress,
 
     pub vendor_id: u16,
     pub device_id: u16,
@@ -154,9 +174,9 @@ impl PciDevice {
     }
 
     fn read(&self, offset: u32) -> u32 {
-        let address: u32 = (self.bus << 16)
-            | (self.device << 11)
-            | (self.function << 8)
+        let address: u32 = ((self.address.bus as u32) << 16)
+            | ((self.address.device as u32) << 11)
+            | ((self.address.function as u32) << 8)
             | (offset & 0xFC)
             | 0x80000000;
         outl(CONFIG_ADDRESS, address);
@@ -165,9 +185,9 @@ impl PciDevice {
     }
 
     fn write(&self, offset: u32, value: u32) {
-        let address: u32 = (self.bus << 16)
-            | (self.device << 11)
-            | (self.function << 8)
+        let address: u32 = ((self.address.bus as u32) << 16)
+            | ((self.address.device as u32) << 11)
+            | ((self.address.function as u32) << 8)
             | (offset & 0xFC)
             | 0x80000000;
         outl(CONFIG_ADDRESS, address);
@@ -197,7 +217,7 @@ fn get_device_name(device: &PciDevice) -> &str {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClass {
     Undefined(PciDeviceClassUndefinedSubclass),
     MassStorageController(PciDeviceClassMassStorageControllerSubclass),
@@ -382,13 +402,13 @@ impl PciDeviceClass {
     }
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassUndefinedSubclass {
     NonVgaCompatibleUnclassifiedDevice,
     VgaCompatibleUnclassifiedDevice,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassMassStorageControllerSubclass {
     ScsiBusController,
     IdeController,
@@ -401,7 +421,7 @@ pub enum PciDeviceClassMassStorageControllerSubclass {
     NonVolatileMemoryController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassNetworkControllerSubclass {
     EthernetController,
     TokenRingController,
@@ -414,14 +434,14 @@ pub enum PciDeviceClassNetworkControllerSubclass {
     FabricController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassDisplayControllerSubclass {
     VgaCompatibleController,
     XgaController,
     NotVgaCompatible3dController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassMultimediaControllerSubclass {
     MultimediaVideoController,
     MultimediaAudioController,
@@ -429,13 +449,13 @@ pub enum PciDeviceClassMultimediaControllerSubclass {
     AudioDevice,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassMemoryControllerSubclass {
     RamController,
     FlashController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassBridgeSubclass {
     HostBridge,
     IsaBridge,
@@ -450,7 +470,7 @@ pub enum PciDeviceClassBridgeSubclass {
     InfiniBandToPciHostBridge,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassSimpleCommunicationControllerSubclass {
     SerialController,
     ParallelController,
@@ -460,7 +480,7 @@ pub enum PciDeviceClassSimpleCommunicationControllerSubclass {
     SmartCardController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassBaseSystemPeripheralSubclass {
     Pic,
     DmaController,
@@ -471,7 +491,7 @@ pub enum PciDeviceClassBaseSystemPeripheralSubclass {
     IoMmu,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassInputDeviceControllerSubclass {
     KeyboardController,
     DigitizerPen,
@@ -480,13 +500,13 @@ pub enum PciDeviceClassInputDeviceControllerSubclass {
     GameportController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassDockingStationSubclass {
     Generic,
 }
 
 #[allow(nonstandard_style)]
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassProcessorSubclass {
     x386,
     x486,
@@ -498,7 +518,7 @@ pub enum PciDeviceClassProcessorSubclass {
     CoProcessor,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassSerialBusControllerSubclass {
     FireWireController,
     AccessBusController,
@@ -512,7 +532,7 @@ pub enum PciDeviceClassSerialBusControllerSubclass {
     CanbusController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassWirelessControllerSubclass {
     IrdaCompatibleController,
     ConsumerIrController,
@@ -523,12 +543,12 @@ pub enum PciDeviceClassWirelessControllerSubclass {
     EthernetControllerB,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassIntelligentControllerSubclass {
     I20,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassSatelliteCommunicationControllerSubclass {
     SatelliteTvController,
     SatelliteAudioController,
@@ -536,13 +556,13 @@ pub enum PciDeviceClassSatelliteCommunicationControllerSubclass {
     SatelliteDataController,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassEncryptionControllerSubclass {
     NetworkAndComputingEncryptionOrDecryption,
     EntertainmentEncryptionOrDecryption,
 }
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Eq, PartialEq, Hash)]
 pub enum PciDeviceClassSignalProcessingControllerSubclass {
     DpioModules,
     PerformanceCounters,

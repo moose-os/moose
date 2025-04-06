@@ -267,10 +267,10 @@ impl AcpicaOsServices for MooseAcpicaOsImplementation {
         value: *mut u64,
         width: u32,
     ) -> ACPI_STATUS {
-        let segment = unsafe { (*pci_id).Segment } as u32;
-        let bus = unsafe { (*pci_id).Bus } as u32;
-        let device = unsafe { (*pci_id).Device } as u32;
-        let function = unsafe { (*pci_id).Function } as u32;
+        let segment = unsafe { (*pci_id).Segment };
+        let bus = unsafe { (*pci_id).Bus };
+        let device = unsafe { (*pci_id).Device };
+        let function = unsafe { (*pci_id).Function };
 
         assert_eq!(segment, 0);
 

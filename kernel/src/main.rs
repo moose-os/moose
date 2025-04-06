@@ -3,6 +3,8 @@
 #![feature(string_remove_matches)]
 #![no_std]
 #![no_main]
+#![allow(unused)]
+#![allow(static_mut_refs)]
 
 extern crate alloc;
 
@@ -31,11 +33,13 @@ use arch::x86::gdt::{
     GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
     SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS, TSS_INDEX,
 };
+use hashbrown::HashMap;
 use core::alloc::Layout;
 use core::arch::asm;
 use core::ptr::addr_of;
 use core::{mem, ptr};
 use driver::acpi::{create_device_list, initialize_acpica};
+use driver::io::device_manager::DeviceManager;
 use driver::net::nic::rtl8139::Rtl8139;
 use kernel::set_kernel;
 use limine::paging::Mode;
@@ -209,8 +213,11 @@ unsafe extern "C" fn _start() -> ! {
     let devices = create_device_list();
 
     for device in &devices {
-        debug!("Device :{:#?}", device);
+        //debug!("Device :{:#?}", device);
     }
+
+    let mgr = DeviceManager::new();
+    mgr.enumerate_devices();
 
     info!("Waiting started");
     PIT.wait_seconds(1);

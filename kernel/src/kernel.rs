@@ -18,6 +18,7 @@ use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
 use alloc::vec::Vec;
 use alloc::{boxed::Box, sync::Arc};
+use hashbrown::HashMap;
 use spin::{Mutex, Once, RwLock};
 use x86_64::registers::rflags;
 use x86_64::registers::segmentation::{Segment64, GS};
@@ -37,6 +38,7 @@ pub struct Kernel {
     current_usable_process_id: AtomicUsize,
     current_usable_thread_id: AtomicUsize,
     processes: RwLock<Vec<Process>>,
+    pub devices_interrupt_map: HashMap<u8, Vec<Arc<dyn Driver>>>,
 }
 
 impl Kernel {
@@ -62,6 +64,7 @@ impl Kernel {
             current_usable_process_id: AtomicUsize::new(0),
             current_usable_thread_id: AtomicUsize::new(0),
             processes: RwLock::new(Vec::new()),
+            devices_interrupt_map: HashMap::new(),
         };
 
         let mut processes = kernel.processes.write();
