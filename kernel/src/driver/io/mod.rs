@@ -52,6 +52,9 @@ pub enum DriverPredicate {
 }
 
 pub trait DriverBase {
+    fn initialize(&mut self, driver_id: DriverId) -> Result<(), DriverError>;
+    fn deinitialize(&self) -> Result<(), DriverError>;
+
     fn attach(&self, device: DeviceRef) -> Result<(), DriverError>;
     fn detach(&self, device: DeviceRef) -> Result<(), DriverError>;
 
@@ -115,7 +118,20 @@ pub trait BusDriver: DriverBase {
     }
 }
 
-pub trait Driver: Debug + DriverBase + BlockDriver + NetworkDriver + BusDriver {}
+pub trait InterruptBasedDriver: DriverBase {
+    fn support_interrupts(&self) -> bool {
+        false
+    }
+
+    fn on_interrupt(&self, irq: u8) {
+        panic!("Unsupported operation")
+    }
+}
+
+pub trait Driver:
+    Debug + DriverBase + BlockDriver + NetworkDriver + BusDriver + InterruptBasedDriver + Send + Sync
+{
+}
 
 // BlockDriver
 // NetworkDriver
@@ -159,6 +175,7 @@ pub enum DeviceType {
     Bus,
 }
 
+pub type DriverId = u64;
 pub type DeviceId = u64;
 
 pub struct DeviceFeatures {

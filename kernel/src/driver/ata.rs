@@ -4,6 +4,7 @@ use crate::{block_driver, bus_driver};
 use alloc::borrow::ToOwned;
 use alloc::boxed::Box;
 use alloc::string::String;
+use alloc::sync::Arc;
 use alloc::vec::Vec;
 use alloc::{format, vec};
 use core::cmp::min;
@@ -21,7 +22,7 @@ use log::{debug, info};
 use raw_cpuid::{CpuId, Hypervisor};
 use spin::{Mutex, RwLock};
 
-use super::io;
+use super::io::{self, InterruptBasedDriver};
 use super::pci::{PciDeviceClass, PciDeviceClassMassStorageControllerSubclass};
 
 const ATA_PRIMARY_IO_PORT: u16 = 0x1F0;
@@ -195,6 +196,14 @@ impl DriverBase for AtaBusDriver {
             ),
         ))
     }
+
+    fn initialize(&mut self, driver_id: io::DriverId) -> Result<(), DriverError> {
+        todo!()
+    }
+
+    fn deinitialize(&self) -> Result<(), DriverError> {
+        todo!()
+    }
 }
 
 impl BusDriver for AtaBusDriver {
@@ -216,6 +225,8 @@ impl BusDriver for AtaBusDriver {
         Ok(disks)
     }
 }
+
+impl InterruptBasedDriver for AtaBusDriver {}
 
 bus_driver!(AtaBusDriver);
 
@@ -292,7 +303,7 @@ impl AtaDiskDriver {
             vendor_id: controller.vendor_id,
             device_id: controller.device_id,
             driver: None,
-            children: vec![],
+            children: vec![], // lubie dzieci mmm dlaczego tu nie ma dzieci
             properties: DeviceProperties::PCI {
                 address: {
                     let DeviceProperties::PCI {
@@ -533,6 +544,14 @@ impl DriverBase for AtaDiskDriver {
             ),
         ))
     }
+
+    fn initialize(&mut self, driver_id: io::DriverId) -> Result<(), DriverError> {
+        todo!()
+    }
+
+    fn deinitialize(&self) -> Result<(), DriverError> {
+        todo!()
+    }
 }
 
 impl BlockDriver for AtaDiskDriver {
@@ -725,6 +744,7 @@ impl BlockDriver for AtaDiskDriver {
 
 impl NetworkDriver for AtaDiskDriver {} // default impl
 impl BusDriver for AtaDiskDriver {} // default impl
+impl InterruptBasedDriver for AtaDiskDriver {} // default impl
 impl io::Driver for AtaDiskDriver {} // default impl
 
 // We don't really care about all reported fields and options

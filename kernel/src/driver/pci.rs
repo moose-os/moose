@@ -136,6 +136,7 @@ impl Pci {
     }
 }
 
+#[derive(Debug)]
 pub struct PciDevice {
     pub address: PciAddress,
 
