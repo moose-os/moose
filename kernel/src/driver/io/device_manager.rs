@@ -1,21 +1,29 @@
 use core::{any::Any, sync::atomic::Ordering};
 
 use alloc::{
-    boxed::Box, sync::Arc, vec::{self, Vec}
+    borrow::ToOwned,
+    boxed::Box,
+    sync::Arc,
+    vec::{self, Vec},
 };
 use hashbrown::HashMap;
 use log::debug;
 use spin::RwLock;
 
-use crate::{arch::x86::idt::register_interrupt_handler, driver::{
-    ata::{AtaBusDriver, AtaDiskDriver},
-    io::DEVICE_ID_COUNTER,
-    pci::{Pci, PciDeviceClass, PciDeviceClassMassStorageControllerSubclass},
-}};
+use crate::{
+    arch::x86::idt::register_interrupt_handler,
+    cpu::ProcessorControlBlock,
+    driver::{
+        ata::{AtaBusDriver, AtaDiskDriver},
+        io::DEVICE_ID_COUNTER,
+        pci::{Pci, PciDeviceClass, PciDeviceClassMassStorageControllerSubclass},
+    },
+    kernel::kernel_ref,
+};
 
 use super::{
     Device, DeviceId, DeviceManagerError, DeviceProperties, DeviceType, Driver, DriverBase,
-    PciAddress,
+    DriverId, PciAddress,
 };
 
 pub type DeviceRef = Arc<Device>;
@@ -190,11 +198,52 @@ impl DeviceManager {
         Ok(())
     }*/
 
-    fn register_interrupt_handlers(self) {
+    fn register_interrupt_handlers(&self) {
         for i in 32..=255 {
-            register_interrupt_handler(i, Box::new(|isf| {
-                
-            }));
+            register_interrupt_handler(
+                i,
+                Box::new(move |isf| {
+                    let kernel = kernel_ref();
+                    if let Some(devices) = kernel.devices_interrupt_map.lock().get(&i) {
+                        devices.iter().for_each(|device| {
+                            let drivers = kernel.drivers_map.lock();
+                            let driver = drivers.get(device).unwrap();
+                            driver.on_interrupt(i);
+                        });
+                    }
+
+                    unsafe {
+                        _ = &(*ProcessorControlBlock::get_pcb_for_current_processor())
+                            .local_apic
+                            .get()
+                            .unwrap()
+                            .signal_end_of_interrupt();
+                    }
+                }),
+            );
         }
     }
+}
+
+pub fn register_device_interrupt(driver: DriverId, irq: u8) -> bool {
+    let (irq, overflowed) = irq.overflowing_sub(32);
+
+    if overflowed {
+        return false;
+    }
+
+    let kernel = kernel_ref();
+
+    let mut map = kernel.devices_interrupt_map.lock();
+
+    let current_list = map.get_mut(&irq);
+    if let Some(list) = current_list {
+        list.push(driver);
+    } else {
+        let list = Vec::from([driver]);
+
+        map.insert(irq, list);
+    }
+
+    true
 }

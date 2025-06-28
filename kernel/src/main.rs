@@ -34,7 +34,6 @@ use arch::x86::gdt::{
     GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
     SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS, TSS_INDEX,
 };
-use hashbrown::HashMap;
 use core::alloc::Layout;
 use core::arch::asm;
 use core::ptr::addr_of;
@@ -42,6 +41,7 @@ use core::{mem, ptr};
 use driver::acpi::{create_device_list, initialize_acpica};
 use driver::io::device_manager::DeviceManager;
 use driver::net::nic::rtl8139::Rtl8139;
+use hashbrown::HashMap;
 use kernel::set_kernel;
 use limine::paging::Mode;
 use limine::request::{
@@ -256,15 +256,15 @@ unsafe extern "C" fn _start() -> ! {
     let pcb = cpu::ProcessorControlBlock::get_pcb_for_current_processor();
 
     _ = (*pcb).local_apic.set(bsp_lapic);
-
-    pci_devices
-        .into_iter()
-        .filter(|dev| dev.device_id == 0x8139)
-        .for_each(|dev| {
-            let mut rtl8139 = Rtl8139::new(Arc::new(Mutex::new(dev)), Arc::clone(&kernel));
-            rtl8139.initialize();
-        });
-
+    /*
+        pci_devices
+            .into_iter()
+            .filter(|dev| dev.device_id == 0x8139)
+            .for_each(|dev| {
+                let mut rtl8139 = Rtl8139::new(Arc::new(Mutex::new(dev)), Arc::clone(&kernel));
+                rtl8139.initialize();
+            });
+    */
     kernel
         .apic
         .read()

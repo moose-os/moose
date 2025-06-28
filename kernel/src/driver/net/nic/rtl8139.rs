@@ -1,8 +1,13 @@
-use alloc::{boxed::Box, sync::Arc, vec::{self, Vec}};
+use alloc::{
+    boxed::Box,
+    sync::Arc,
+    vec::{self, Vec},
+};
 use core::slice;
+use hashbrown::HashMap;
 use log::debug;
 use raw_cpuid::{CpuId, Hypervisor};
-use spin::Mutex;
+use spin::{Mutex, RwLock};
 use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
 
 use crate::{
@@ -15,10 +20,17 @@ use crate::{
     },
     cpu::ProcessorControlBlock,
     driver::{
-        apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode}, io::{device_manager::DeviceRef, Device, DriverBase, DriverError, DriverPredicate, NetworkDriver, NetworkState}, pci::PciDevice
+        apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode},
+        io::{
+            device_manager::{register_device_interrupt, DeviceRef},
+            Device, DeviceId, DriverBase, DriverError, DriverId, DriverPredicate,
+            InterruptBasedDriver, NetworkDriver, NetworkState,
+        },
+        pci::PciDevice,
     },
-    kernel::Kernel,
-    memory::{memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE}, network_driver,
+    kernel::{kernel_ref, Kernel},
+    memory::{memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE},
+    network_driver,
 };
 
 const BUFE_BIT: u8 = 0x1;
@@ -35,56 +47,23 @@ const CONFIG_1_REGISTER: u16 = 0x52;
 const RX_RING_BUFFER_SIZE: usize = 65536;
 const RX_BUFFER_SIZE: usize = RX_RING_BUFFER_SIZE + 1518 + 4 + 4;
 
-
+#[derive(Debug)]
+pub struct Rtl8139Driver {
+    devices: RwLock<HashMap<DeviceId, Rtl8139State>>,
+    driver_id: DriverId,
+}
 
 #[derive(Debug)]
-pub struct Rtl8139Driver {}
+pub struct Rtl8139State {
+    pci_device: Arc<Mutex<PciDevice>>,
+    io_base: u16,
+    rx_buffer: *mut u8,
+    current_rx_offset: usize,
+    current_tx_index: usize,
+}
 
 impl DriverBase for Rtl8139Driver {
     fn attach(&self, device: DeviceRef) -> Result<(), DriverError> {
-        todo!()
-    }
-
-    fn detach(&self, device: DeviceRef) -> Result<(), DriverError> {
-        todo!()
-    }
-
-    fn supported_devices(&self) -> Result<DriverPredicate, DriverError> {
-        Ok(DriverPredicate::PciDeviceAndVendorId { vendor_id: 0x10EC, device_id: 0x8139 })
-    }
-}
-
-impl NetworkDriver for Rtl8139Driver {
-    fn supports_network_capabilities(&self) -> bool {
-        true
-    }
-
-    fn send_packet(&self, device: &Device, packet: &[u8]) -> Result<(), DriverError> {
-        panic!("Unsupported operation");
-    }
-
-    fn receive_packet(&self, device: &Device) -> Result<Option<Vec<u8>>, DriverError> {
-        panic!("Unsupported operation");
-    }
-
-    fn mac_address(&self, device: &Device) -> [u8; 6] {
-        panic!("Unsupported operation");
-    }
-
-    fn set_state(&self, device: &Device, state: NetworkState) -> Result<(), DriverError> {
-        panic!("Unsupported operation");
-    }
-}
-
-network_driver!(Rtl8139Driver);
-
-
-pub struct Rtl8139 {
-    inner: Arc<Mutex<Rtl8139Inner>>,
-}
-
-impl Rtl8139 {
-    pub fn new(pci_device: Arc<Mutex<PciDevice>>, kernel: Arc<Kernel>) -> Rtl8139 {
         let mut memory_manager = memory_manager().write();
 
         // We use 64kb ring buffer for RX buffer and want to map first page after the last one,
@@ -123,21 +102,396 @@ impl Rtl8139 {
                 .unwrap();
         }
 
-        let bar0 = pci_device.lock().get_bar(0);
+        let pci_device = device.to_pci_device().unwrap();
+        let bar0 = pci_device.get_bar(0);
         assert_eq!(bar0 & 1, 1); // Safety check that device reports I/O address in first BAR.
 
-        Self {
-            inner: Arc::new(Mutex::new(Rtl8139Inner {
-                pci_device,
-                io_base: (bar0 & !0x3) as u16,
-                rx_buffer: frames[0].address().as_u64() as *mut u8,
-                current_rx_offset: 0,
-                kernel,
-                current_tx_index: 0,
-            })),
+        let state = Rtl8139State {
+            pci_device: Arc::new(Mutex::new(pci_device)),
+            io_base: (bar0 & !0x3) as u16,
+            rx_buffer: frames[0].address().as_u64() as *mut u8,
+            current_rx_offset: 0,
+            current_tx_index: 0,
+        };
+
+        Ok(())
+    }
+
+    fn detach(&self, device: DeviceRef) -> Result<(), DriverError> {
+        todo!()
+    }
+
+    fn supported_devices(&self) -> Result<DriverPredicate, DriverError> {
+        Ok(DriverPredicate::PciDeviceAndVendorId {
+            vendor_id: 0x10EC,
+            device_id: 0x8139,
+        })
+    }
+
+    fn initialize(&mut self, driver_id: DriverId) -> Result<(), DriverError> {
+        self.driver_id = driver_id;
+
+        Ok(())
+    }
+
+    fn deinitialize(&self) -> Result<(), DriverError> {
+        todo!()
+    }
+}
+
+impl NetworkDriver for Rtl8139Driver {
+    fn supports_network_capabilities(&self) -> bool {
+        true
+    }
+
+    fn send_packet(&self, device: &Device, packet: &[u8]) -> Result<(), DriverError> {
+        // Safety checks
+        assert!(packet.len() < 1518);
+        assert!(packet.len() > 0);
+
+        // Disable interrupts because we take a writable reference to devices state and dont want to deadlock in interrupt service routine.
+        without_interrupts(|| {
+            let mut devices = self.devices.write();
+            let mut state = devices.get_mut(&device.id).unwrap();
+
+            let (transmit_buffer, transmit_status) = self.get_current_transmit_registers(state);
+            let io_base = state.io_base;
+
+            // Create buffer and copy user delivered data to it.
+            //
+            // It's needed mostly because we need to be aligned at the page boundary,
+            // the data can't be on two, not physically contiguous, page frames.
+            let mut tx_buffer = Box::new(TxBuffer([0u8; 1518]));
+            tx_buffer.as_mut().0[0..packet.len()].copy_from_slice(packet);
+
+            // Get physical address of the buffer
+            let tx_buffer_virtual_address = &mut *tx_buffer as *mut TxBuffer;
+            let tx_buffer_phys_address = memory_manager()
+                .read()
+                .translate_virtual_address_to_physical_for_current_address_space(
+                    VirtualAddress::new(tx_buffer_virtual_address.addr() as u64),
+                )
+                .unwrap()
+                .as_u64();
+
+            // Safety check it fits in 32 bits
+            assert!(tx_buffer_phys_address < (1 << 32));
+
+            outl(io_base + transmit_buffer, tx_buffer_phys_address as u32);
+            outl(io_base + transmit_status, packet.len() as u32);
+
+            self.adjust_transmit_registers(&mut state);
+        });
+
+        Ok(())
+    }
+
+    fn receive_packet(&self, device: &Device) -> Result<Option<Vec<u8>>, DriverError> {
+        panic!("Unsupported operation");
+    }
+
+    fn mac_address(&self, device: &Device) -> [u8; 6] {
+        panic!("Unsupported operation");
+    }
+
+    fn set_state(&self, device: &Device, state: NetworkState) -> Result<(), DriverError> {
+        panic!("Unsupported operation");
+    }
+}
+
+impl InterruptBasedDriver for Rtl8139Driver {
+    fn support_interrupts(&self) -> bool {
+        true
+    }
+
+    fn on_interrupt(&self, irq: u8) {
+        let mut devices = self.devices.write();
+
+        devices.iter_mut().for_each(|(_, nic)| {
+            let mut any_flag_set = false;
+            let status = inw(nic.io_base + INTERRUPT_STATUS_REGISTER);
+
+            // Can't use smarter way, because flags are not exclusive
+            if (status & (1 << 2)) != 0 {
+                debug!("Packet sent");
+                any_flag_set = true;
+            }
+
+            if (status & (1 << 0)) != 0 {
+                // Packet received
+                self.handle_received_packet(nic);
+                any_flag_set = true;
+            }
+
+            if (status & (1 << 1)) != 0 {
+                panic!("Rcv err!");
+                any_flag_set = true;
+            }
+
+            if (status & (1 << 4)) != 0 {
+                panic!("RX buffer overflow");
+                any_flag_set = true;
+            }
+
+            if any_flag_set {
+                // Acknowledge interrupt
+                // This also allows RTL8139 to overwrite our data, so from this moment we can't rely on rx buffer
+                outw(nic.io_base + INTERRUPT_STATUS_REGISTER, status);
+            }
+        });
+    }
+}
+
+impl Rtl8139Driver {
+    fn get_current_transmit_registers(&self, device: &Rtl8139State) -> (u16, u16) {
+        match device.current_tx_index {
+            0 => (0x20, 0x10),
+            1 => (0x24, 0x14),
+            2 => (0x28, 0x18),
+            3 => (0x2C, 0x1C),
+            _ => unreachable!(),
         }
     }
 
+    fn adjust_transmit_registers(&self, device: &mut Rtl8139State) {
+        // RTL8139 has 4 transmit registers for sending data, and they are used with round-robin style.
+
+        device.current_tx_index += 1;
+
+        if device.current_tx_index >= 4 {
+            device.current_tx_index = 0;
+        }
+    }
+
+    fn handle_received_packet(&self, device: &mut Rtl8139State) {
+        // NIC can copy a lot of frames during one DMA transfer, and instead of doing
+        // one interrupt-one frame thing, we can process multiple frames during one interrupt
+        loop {
+            // Received data from the wire are preceded by two u16's:
+            //   - data status
+            //   - data length
+
+            let data_start = unsafe { device.rx_buffer.add(device.current_rx_offset) };
+            let status = unsafe { (data_start.add(0) as *const u16).read_volatile() };
+            let length = unsafe { (data_start.add(2) as *const u16).read_volatile() };
+
+            // If the NIC marked packet as invalid OR rx buffer is empty (because we've processed
+            // all packets), then quit
+            if ((status & (1 << 0)) != 1)
+                || ((inb(device.io_base + COMMAND_REGISTER) & BUFE_BIT) != 0)
+            {
+                break;
+            }
+
+            debug!(
+                "Received data with length {}, status={}, offset={}",
+                length, status, device.current_rx_offset
+            );
+
+            // 4 is the data status and data length
+            // 1518 is maximum Ethernet frame length
+            // 4 is CRC32 checksum appended at the end of the data
+            let mut buffer = [0u8; 4 + 1518 + 4];
+
+            buffer[..length as usize]
+                .copy_from_slice(unsafe { slice::from_raw_parts(data_start, length as usize) });
+
+            // @TODO: Pass buffer to the higher layers
+
+            device.current_rx_offset = (device.current_rx_offset + length as usize + 4 + 3) & !3;
+
+            // It's ring buffer, so if we overflow, just go back to the start. We're parsing frames
+            // one by one, so there's no possibility it would overflow two or more times.
+            if device.current_rx_offset > RX_RING_BUFFER_SIZE {
+                device.current_rx_offset -= RX_RING_BUFFER_SIZE;
+            }
+
+            // Notify network card about new RX buffer reading offset
+            outw(
+                device.io_base + CAPR,
+                (device.current_rx_offset as u16).overflowing_sub(0x10).0,
+            );
+        }
+    }
+
+    fn initialize_device(&self, state: &mut Rtl8139State) {
+        assert_eq!(
+            CpuId::new().get_hypervisor_info().unwrap().identify(),
+            Hypervisor::QEMU,
+            "RTL8139 interrupts are only supported on QEMU currently, due to very unpleasant way of handling interrupts without MSI/MSI-X on PCI devices."
+        );
+
+        assert!(
+            [8192, 16384, 32768, 65536].contains(&RX_RING_BUFFER_SIZE),
+            "Ring buffer size must be 8kb, 16kb, 32kb or 64kb"
+        );
+
+        without_interrupts(|| {
+            let pci_device = state.pci_device.lock();
+
+            // Enable DMA (Bus Master)
+            pci_device.enable_dma();
+
+            // Get interrupt line from the PCI configuration space
+            //
+            // This is weird actually, because it should be totally random when using APIC + IRQ sharing, but in QEMU
+            // for some reason it works.
+            let interrupt_line = pci_device.get_interrupt_line();
+            let irq = kernel_ref()
+                .irq_allocator
+                .lock()
+                .allocate_irq(IrqLevel::NetworkInterfaceCard);
+
+            debug!(
+                "[RTL8139] Using IRQ#{} with interrupt line {}",
+                irq, interrupt_line
+            );
+
+            let redirection_entry = RedirectionEntry::new()
+                .with_delivery_mode(DeliveryMode::Fixed)
+                .with_destination(0)
+                .with_mask(false)
+                .with_destination_mode(DestinationMode::Physical)
+                .with_interrupt_vector(irq)
+                .with_pin_polarity(PinPolarity::ActiveHigh)
+                .with_trigger_mode(TriggerMode::Edge);
+
+            kernel_ref()
+                .apic
+                .read()
+                .redirect_interrupt(redirection_entry, interrupt_line);
+
+            register_device_interrupt(self.driver_id, irq);
+
+            // Set the LWAKE and LWPTN to active high. This should power on the device.
+            outb(state.io_base + CONFIG_1_REGISTER, 0x00);
+
+            // Perform software reset to make sure there's no garbage in buffers or registers.
+            outb(state.io_base + COMMAND_REGISTER, RST_BIT);
+
+            // Wait until the device reports success.
+            loop {
+                if (inb(state.io_base + COMMAND_REGISTER) & RST_BIT) == 0 {
+                    break;
+                }
+            }
+
+            // Initialize receive buffer (RX)
+            let rx_buffer_physical_address = memory_manager()
+                .read()
+                .translate_virtual_address_to_physical_for_current_address_space(
+                    VirtualAddress::new(state.rx_buffer as u64),
+                )
+                .unwrap()
+                .as_u64();
+
+            outl(
+                state.io_base + RBSTART_REGISTER,
+                rx_buffer_physical_address as u32,
+            );
+
+            // Initialize interrupts
+            //
+            // We're setting Tx OK Interrupt (bit 2) and Rx OK Interrupt (bit 0)
+            // For more settings see Realtek RTL8139 DataSheet table at page 18
+            outw(
+                state.io_base + INTERRUPT_MASK_REGISTER,
+                (1 << 2) | 1 | (1 << 4),
+            );
+
+            let rx_buffer_size_bits = match RX_RING_BUFFER_SIZE {
+                8192 => 0b00,
+                16384 => 0b01,
+                32768 => 0b10,
+                65536 => 0b11,
+                _ => unreachable!(),
+            };
+
+            // Initialize receiver options
+            outl(
+                state.io_base + RECEIVE_CONFIGURATION_REGISTER,
+                // WRAP bit would be the best setting, but for some reason
+                // QEMU does not support it
+                (rx_buffer_size_bits << 11) |
+                (1 << 3) | // Accept Broadcast Packets
+                (1 << 2) | // Accept Multicast Packets
+                (1 << 1) | // Accept Physical Match Packets
+                1, // Accept All Packets
+            );
+
+            // Finally, enable receiver and transmitter
+            //                                        RE      |  TE
+            outb(state.io_base + COMMAND_REGISTER, (1 << 3) | (1 << 2));
+        });
+    }
+}
+
+unsafe impl Send for Rtl8139State {}
+unsafe impl Sync for Rtl8139State {}
+
+network_driver!(Rtl8139Driver);
+
+pub struct Rtl8139 {
+    inner: Arc<Mutex<Rtl8139Inner>>,
+}
+
+impl Rtl8139 {
+    /*
+        pub fn new(pci_device: Arc<Mutex<PciDevice>>, kernel: Arc<Kernel>) -> Rtl8139 {
+            let mut memory_manager = memory_manager().write();
+
+            // We use 64kb ring buffer for RX buffer and want to map first page after the last one,
+            // so we'll be able to read buffer without complex logic related to wrapping ring buffer.
+            //
+            // 64kb occupies 16 physical pages.
+            // We allocate them manually as we need to explicilty have 16 **physically contiguous** pages.
+            let mut frames = alloc::vec![];
+
+            for _ in 0..(RX_RING_BUFFER_SIZE / PAGE_SIZE) {
+                frames.push(memory_manager.allocate_frame().unwrap());
+            }
+
+            // Identity map frame buffer pages
+            for frame in &frames {
+                unsafe {
+                    memory_manager
+                        .map_identity_for_current_address_space(
+                            &Page::new(VirtualAddress::new(frame.address().as_u64())),
+                            PageFlags::WRITABLE,
+                        )
+                        .unwrap();
+                }
+            }
+
+            // Map start of the buffer right after the end
+            unsafe {
+                memory_manager
+                    .map_for_current_address_space(
+                        &Page::new(VirtualAddress::new(
+                            frames.last().unwrap().address().as_u64() + PAGE_SIZE as u64,
+                        )),
+                        &Frame::new(PhysicalAddress::new(frames[0].address().as_u64())),
+                        PageFlags::WRITABLE,
+                    )
+                    .unwrap();
+            }
+
+            let bar0 = pci_device.lock().get_bar(0);
+            assert_eq!(bar0 & 1, 1); // Safety check that device reports I/O address in first BAR.
+
+            Self {
+                inner: Arc::new(Mutex::new(Rtl8139Inner {
+                    pci_device,
+                    io_base: (bar0 & !0x3) as u16,
+                    rx_buffer: frames[0].address().as_u64() as *mut u8,
+                    current_rx_offset: 0,
+                    kernel,
+                    current_tx_index: 0,
+                })),
+            }
+        }
+    */
+    /*
     pub fn initialize(&mut self) {
         assert_eq!(
             CpuId::new().get_hypervisor_info().unwrap().identify(),
@@ -261,7 +615,8 @@ impl Rtl8139 {
             outb(rtl8139.io_base + COMMAND_REGISTER, (1 << 3) | (1 << 2));
         });
     }
-
+    */
+    /*
     pub fn send_packet(&mut self, data: &[u8]) {
         // Safety checks
         assert!(data.len() < 1518);
@@ -316,6 +671,7 @@ impl Rtl8139 {
             inner.current_tx_index = 0;
         }
     }
+    */
 }
 
 struct Rtl8139Inner {
@@ -326,7 +682,7 @@ struct Rtl8139Inner {
     current_tx_index: usize,
     kernel: Arc<Kernel>,
 }
-
+/*
 impl Rtl8139Inner {
     fn handle_received_packet(&mut self) {
         // NIC can copy a lot of frames during one DMA transfer, and instead of doing
@@ -379,7 +735,7 @@ impl Rtl8139Inner {
         }
     }
 }
-
+*/
 unsafe impl Send for Rtl8139Inner {}
 
 #[repr(C, align(4096))]
@@ -387,7 +743,7 @@ struct RxBuffer([u8; RX_BUFFER_SIZE]);
 
 #[repr(C, align(4096))]
 struct TxBuffer([u8; 1518]);
-
+/*
 fn handle_rtl8139_interrupt(nic: &mut Rtl8139Inner) {
     let status = inw(nic.io_base + INTERRUPT_STATUS_REGISTER);
 
@@ -412,12 +768,5 @@ fn handle_rtl8139_interrupt(nic: &mut Rtl8139Inner) {
     // Acknowledge interrupt
     // This also allows RTL8139 to overwrite our data, so from this moment we can't rely on rx buffer
     outw(nic.io_base + INTERRUPT_STATUS_REGISTER, status);
-
-    unsafe {
-        _ = &(*ProcessorControlBlock::get_pcb_for_current_processor())
-            .local_apic
-            .get()
-            .unwrap()
-            .signal_end_of_interrupt();
-    }
 }
+*/
