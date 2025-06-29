@@ -28,7 +28,7 @@ linked_list_allocator = "0.10.5"
 
 pic8259 = { version = "0.11.0", default-features = false }
 
-limine = { version = "0.4.0", default-features = false }
+limine = { version = "0.5.0", default-features = false }
 
 acpica-rs = { git = "https://github.com/moose-os/acpica-rs" }
 hashbrown = "0.15.2"

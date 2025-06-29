@@ -3,7 +3,7 @@ param(
 )
 
 function package_moose([string]$mode) {
-    Copy-Item limine.cfg -Destination iso_root/boot/limine/
+    Copy-Item limine.conf -Destination iso_root/boot/limine/
     Copy-Item target/x86_64-moose/$mode/kernel -Destination iso_root/boot/
 
     wsl xorriso -as mkisofs -b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image --protective-msdos-label iso_root -o moose.iso
@@ -25,7 +25,7 @@ if (-not (Test-Path -Path iso_root)) {
 }
 
 if (-not (Test-Path -Path limine)) {
-    git clone https://github.com/limine-bootloader/limine.git --branch=v7.x-binary --depth=1
+    git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1
 
     Copy-Item limine/limine-bios.sys -Destination iso_root/boot/limine/
     Copy-Item limine/limine-bios-cd.bin -Destination iso_root/boot/limine/
