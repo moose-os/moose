@@ -49,8 +49,8 @@ const RX_BUFFER_SIZE: usize = RX_RING_BUFFER_SIZE + 1518 + 4 + 4;
 
 #[derive(Debug)]
 pub struct Rtl8139Driver {
-    devices: RwLock<HashMap<DeviceId, Rtl8139State>>,
-    driver_id: DriverId,
+    pub devices: RwLock<HashMap<DeviceId, Rtl8139State>>,
+    pub driver_id: DriverId,
 }
 
 #[derive(Debug)]
@@ -106,13 +106,17 @@ impl DriverBase for Rtl8139Driver {
         let bar0 = pci_device.get_bar(0);
         assert_eq!(bar0 & 1, 1); // Safety check that device reports I/O address in first BAR.
 
-        let state = Rtl8139State {
+        let mut state = Rtl8139State {
             pci_device: Arc::new(Mutex::new(pci_device)),
             io_base: (bar0 & !0x3) as u16,
             rx_buffer: frames[0].address().as_u64() as *mut u8,
             current_rx_offset: 0,
             current_tx_index: 0,
         };
+
+        self.initialize_device(&mut state);
+
+        //self.devices.write().insert(device.id, state);
 
         Ok(())
     }
