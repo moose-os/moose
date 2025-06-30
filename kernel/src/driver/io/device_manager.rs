@@ -14,9 +14,14 @@ use crate::{
     arch::x86::idt::register_interrupt_handler,
     cpu::ProcessorControlBlock,
     driver::{
+        acpi::create_device_list,
         ata::{AtaBusDriver, AtaDiskDriver},
         io::DEVICE_ID_COUNTER,
-        pci::{Pci, PciDeviceClass, PciDeviceClassMassStorageControllerSubclass},
+        net::nic::rtl8139::Rtl8139Driver,
+        pci::{
+            Pci, PciDeviceClass, PciDeviceClassMassStorageControllerSubclass,
+            PciDeviceClassNetworkControllerSubclass,
+        },
     },
     kernel::kernel_ref,
 };
@@ -57,6 +62,15 @@ impl DeviceManager {
                 })
             ],
         );
+        class_to_driver_map.insert(
+            PciDeviceClass::NetworkController(
+                PciDeviceClassNetworkControllerSubclass::EthernetController,
+            ),
+            alloc::vec![Arc::new(Rtl8139Driver {
+                devices: RwLock::new(HashMap::new()),
+                driver_id: 123,
+            }),],
+        );
 
         let pci_devices = Pci::build_device_tree();
         let mut devices = alloc::vec![];
@@ -77,12 +91,17 @@ impl DeviceManager {
                 device_id: dev.device_id as u32,
                 driver: None,
                 children: alloc::vec![],
-                can_be_bus_controller: true,
+                can_be_bus_controller: self.can_be_bus_controller(dev.class),
             };
 
             self.find_driver(&mut device, &class_to_driver_map, &mut devices);
 
             devices.push(Arc::new(device));
+        }
+
+        let acpi_devices = create_device_list();
+        for dev in acpi_devices {
+            // debug!("Device :{:#?}", dev);
         }
 
         fn callback(device: &Arc<Device>) {
@@ -94,6 +113,9 @@ impl DeviceManager {
                 debug!("Data: {:x?}", driver.read_block(device.id, 0).unwrap());
                 let data = [0xAAu8; 512];
                 driver.write_block(device.id, 0, &data);
+            }
+            if driver.supports_network_capabilities() {
+                driver.attach(device.clone()).unwrap();
             }
 
             for child in device.children.iter() {
@@ -114,6 +136,13 @@ impl DeviceManager {
         }
 
         //    debug!("Devices: {:#?}", devices);
+    }
+
+    fn can_be_bus_controller(&self, pci_class: PciDeviceClass) -> bool {
+        pci_class
+            == PciDeviceClass::MassStorageController(
+                PciDeviceClassMassStorageControllerSubclass::AtaController,
+            )
     }
 
     fn find_driver(

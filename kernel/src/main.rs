@@ -209,15 +209,6 @@ unsafe extern "C" fn _start() -> ! {
 
     initialize_acpica().unwrap();
 
-    let devices = create_device_list();
-
-    for device in &devices {
-        //debug!("Device :{:#?}", device);
-    }
-
-    let mgr = DeviceManager::new();
-    mgr.enumerate_devices();
-
     info!("Waiting started");
     PIT.wait_seconds(1);
     info!("Waiting has ended");
@@ -250,6 +241,9 @@ unsafe extern "C" fn _start() -> ! {
 
     set_kernel(Arc::clone(&kernel));
 
+    let mgr = DeviceManager::new();
+    mgr.enumerate_devices();
+
     let pci_devices = Pci::build_device_tree();
 
     let bsp_lapic = LocalApic::initialize_for_current_processor(Arc::clone(&kernel));
@@ -265,6 +259,8 @@ unsafe extern "C" fn _start() -> ! {
                 rtl8139.initialize();
             });
     */
+
+    loop {}
     kernel
         .apic
         .read()

@@ -35,7 +35,7 @@ pub fn init_idt() {
         IDT.invalid_opcode.set_handler_fn(invalid_opcode_handler);
         IDT.device_not_available
             .set_handler_fn(device_not_available_handler);
-        IDT.double_fault.set_handler_fn(double_fault_handler);
+        // IDT.double_fault.set_handler_fn(double_fault_handler);
         // Coprocessor segment overrun
         IDT.invalid_tss.set_handler_fn(invalid_tss_handler);
         IDT.segment_not_present
@@ -49,7 +49,7 @@ pub fn init_idt() {
         IDT.x87_floating_point
             .set_handler_fn(x87_floating_point_exception_handler);
         IDT.alignment_check.set_handler_fn(alignment_check_handler);
-        IDT.machine_check.set_handler_fn(machine_check_handler);
+        // IDT.machine_check.set_handler_fn(machine_check_handler);
         IDT.simd_floating_point
             .set_handler_fn(simd_floating_point_exception_handler);
         IDT.virtualization
@@ -411,7 +411,7 @@ extern "x86-interrupt" fn device_not_available_handler(interrupt_stack_frame: In
 extern "x86-interrupt" fn double_fault_handler(
     interrupt_stack_frame: InterruptStackFrame,
     error_code: u64,
-) -> ! {
+) {
     use_kernel_page_table(|| {
         error!("Double fault");
 
@@ -545,7 +545,7 @@ extern "x86-interrupt" fn alignment_check_handler(
     }
 }
 
-extern "x86-interrupt" fn machine_check_handler(interrupt_stack_frame: InterruptStackFrame) -> ! {
+extern "x86-interrupt" fn machine_check_handler(interrupt_stack_frame: InterruptStackFrame) {
     use_kernel_page_table(|| {
         warn!("Machine check");
 

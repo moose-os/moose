@@ -214,6 +214,7 @@ fn get_device_name(device: &PciDevice) -> &str {
         (0x8086, 0x7000) => "82371SB PIIX3 ISA [Natoma/Triton II]",
         (0x8086, 0x7010) => "82371SB PIIX3 IDE [Natoma/Triton II]",
         (0x8086, 0x7113) => "82371AB/EB/MB PIIX4 ACPI",
+        (0x10ec, 0x8139) => "RTL-8139/8139C/8139C+ Ethernet Controller",
         _ => "Unknown",
     }
 }

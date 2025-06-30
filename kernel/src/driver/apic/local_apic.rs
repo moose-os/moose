@@ -226,7 +226,7 @@ impl LocalApic {
     }
 }
 
-#[naked]
+#[unsafe(naked)]
 pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
     unsafe {
         naked_asm!(
