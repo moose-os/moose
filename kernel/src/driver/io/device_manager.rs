@@ -58,7 +58,9 @@ impl DeviceManager {
             alloc::vec![
                 Arc::new(AtaBusDriver {}),
                 Arc::new(AtaDiskDriver {
-                    disks: RwLock::new(HashMap::new())
+                    disks: RwLock::new(HashMap::new()),
+                    // @TODO: Replace it with global counter? dynamic registration?
+                    driver_id: 1,
                 })
             ],
         );
@@ -68,19 +70,25 @@ impl DeviceManager {
             ),
             alloc::vec![Arc::new(Rtl8139Driver {
                 devices: RwLock::new(HashMap::new()),
-                driver_id: 123,
+                driver_id: 2,
             }),],
+        );
+
+        // @TODO: Need to register every driver in `drivers_map`, otherwise interrupts wont work.
+        kernel_ref().drivers_map.lock().insert(
+            2,
+            class_to_driver_map
+                .get(&PciDeviceClass::NetworkController(
+                    PciDeviceClassNetworkControllerSubclass::EthernetController,
+                ))
+                .unwrap()[0]
+                .clone(),
         );
 
         let pci_devices = Pci::build_device_tree();
         let mut devices = alloc::vec![];
 
         for dev in pci_devices {
-            // debug!(
-            //        "PCI dev: {:?} {} {}",
-            //         dev.class, dev.vendor_id, dev.device_id
-            //   );
-
             let mut device = Device {
                 properties: DeviceProperties::PCI {
                     address: dev.address,
@@ -99,20 +107,19 @@ impl DeviceManager {
             devices.push(Arc::new(device));
         }
 
-        let acpi_devices = create_device_list();
-        for dev in acpi_devices {
-            // debug!("Device :{:#?}", dev);
-        }
+        // @TODO: Take care of ACPI device tree here
+        //
+        // let acpi_devices = create_device_list();
+        // for dev in acpi_devices {
+        //   debug!("Device :{:#?}", dev);
+        // }
 
         fn callback(device: &Arc<Device>) {
             let mut driver = device.driver.clone().unwrap();
             if driver.supports_block_capabilities() {
-                debug!("Driver block size: {}", driver.block_size());
                 driver.attach(device.clone()).unwrap();
 
                 debug!("Data: {:x?}", driver.read_block(device.id, 0).unwrap());
-                let data = [0xAAu8; 512];
-                driver.write_block(device.id, 0, &data);
             }
             if driver.supports_network_capabilities() {
                 driver.attach(device.clone()).unwrap();
@@ -135,13 +142,13 @@ impl DeviceManager {
             callback(device);
         }
 
-        //    debug!("Devices: {:#?}", devices);
+        self.register_interrupt_handlers();
     }
 
     fn can_be_bus_controller(&self, pci_class: PciDeviceClass) -> bool {
         pci_class
             == PciDeviceClass::MassStorageController(
-                PciDeviceClassMassStorageControllerSubclass::AtaController,
+                PciDeviceClassMassStorageControllerSubclass::IdeController,
             )
     }
 
@@ -186,49 +193,16 @@ impl DeviceManager {
 
         true
     }
-    /*
-        pub fn register_device(&self, device: Arc<dyn Device>) {
-            let mut devices = self.devices.write();
-            devices.insert(device.id(), device);
-        }
-
-        pub fn register_driver(&self, device_type: DeviceType, driver: Arc<dyn Driver>) {
-            let mut drivers = self.drivers.write();
-            drivers.insert(device_type, driver);
-        }
-    */
     pub fn initialize(&self) -> Result<(), DeviceManagerError> {
-        /*     let devices = self.devices.read();
-        let drivers = self.drivers.read();
-
-        for (_, device) in devices.iter() {
-            let device_type = device.device_type();
-            if let Some(driver) = drivers.get(&device_type) {
-                device
-                    .initialize(DeviceProperties::PCI { address: PciAddress { bus: 0, device: 0, function: 0 } })
-                    .map_err(|e| DeviceManagerError::DeviceError(e));
-                driver
-                    .attach(device.as_ref(), self)
-                    .map_err(|e| DeviceManagerError::DriverError(e));
-            }
-        }*/
         Ok(())
     }
 
-    /*pub fn handle_interrupt(&self, device_id: DeviceId, interrupt: Interrupt) -> Result<(), DeviceManagerError> {
-        let devices = self.devices.read().unwrap();
-        let drivers = self.drivers.read().unwrap();
-
-        if let Some(device) = devices.get(&device_id) {
-            if let Some(driver) = drivers.get(&device.device_type()) {
-                driver.handle_interrupt(interrupt)?;
-            }
-        }
-        Ok(())
-    }*/
-
     fn register_interrupt_handlers(&self) {
         for i in 32..=255 {
+            if i == 0x80 {
+                continue;
+            }
+
             register_interrupt_handler(
                 i,
                 Box::new(move |isf| {
@@ -255,12 +229,6 @@ impl DeviceManager {
 }
 
 pub fn register_device_interrupt(driver: DriverId, irq: u8) -> bool {
-    let (irq, overflowed) = irq.overflowing_sub(32);
-
-    if overflowed {
-        return false;
-    }
-
     let kernel = kernel_ref();
 
     let mut map = kernel.devices_interrupt_map.lock();
