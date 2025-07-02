@@ -114,9 +114,12 @@ impl DriverBase for Rtl8139Driver {
             current_tx_index: 0,
         };
 
+        // We don't use it anymore, dropping it now avoids deadlock in `self.initialize_device()`
+        drop(memory_manager);
+
         self.initialize_device(&mut state);
 
-        //self.devices.write().insert(device.id, state);
+        self.devices.write().insert(device.id, state);
 
         Ok(())
     }
@@ -150,8 +153,8 @@ impl NetworkDriver for Rtl8139Driver {
 
     fn send_packet(&self, device: &Device, packet: &[u8]) -> Result<(), DriverError> {
         // Safety checks
+        assert!(!packet.is_empty());
         assert!(packet.len() < 1518);
-        assert!(packet.len() > 0);
 
         // Disable interrupts because we take a writable reference to devices state and dont want to deadlock in interrupt service routine.
         without_interrupts(|| {
@@ -184,7 +187,7 @@ impl NetworkDriver for Rtl8139Driver {
             outl(io_base + transmit_buffer, tx_buffer_phys_address as u32);
             outl(io_base + transmit_status, packet.len() as u32);
 
-            self.adjust_transmit_registers(&mut state);
+            self.adjust_transmit_registers(state);
         });
 
         Ok(())
@@ -346,10 +349,7 @@ impl Rtl8139Driver {
                 .lock()
                 .allocate_irq(IrqLevel::NetworkInterfaceCard);
 
-            debug!(
-                "[RTL8139] Using IRQ#{} with interrupt line {}",
-                irq, interrupt_line
-            );
+            debug!("[RTL8139] Using IRQ#{irq} with interrupt line {interrupt_line}");
 
             let redirection_entry = RedirectionEntry::new()
                 .with_delivery_mode(DeliveryMode::Fixed)
@@ -749,30 +749,3 @@ struct RxBuffer([u8; RX_BUFFER_SIZE]);
 
 #[repr(C, align(4096))]
 struct TxBuffer([u8; 1518]);
-/*
-fn handle_rtl8139_interrupt(nic: &mut Rtl8139Inner) {
-    let status = inw(nic.io_base + INTERRUPT_STATUS_REGISTER);
-
-    // Can't use smarter way, because flags are not exclusive
-    if (status & (1 << 2)) != 0 {
-        debug!("Packet sent");
-    }
-
-    if (status & (1 << 0)) != 0 {
-        // Packet received
-        nic.handle_received_packet();
-    }
-
-    if (status & (1 << 1)) != 0 {
-        panic!("Rcv err!");
-    }
-
-    if (status & (1 << 4)) != 0 {
-        panic!("RX buffer overflow")
-    }
-
-    // Acknowledge interrupt
-    // This also allows RTL8139 to overwrite our data, so from this moment we can't rely on rx buffer
-    outw(nic.io_base + INTERRUPT_STATUS_REGISTER, status);
-}
-*/

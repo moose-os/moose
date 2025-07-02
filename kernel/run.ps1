@@ -25,7 +25,7 @@ if ($logs) {
 [void]$command.Append('-device rtl8139,netdev=n1 ')
 
 [void]$command.Append('-drive file=moose.iso,format=raw,if=ide ')
-[void]$command.Append('-drive file=fat.img,format=raw ')
+[void]$command.Append('-drive file=fat.img,format=raw,if=ide ')
 [void]$command.Append('-serial stdio ')
 
 if ($release) {

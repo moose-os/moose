@@ -39,12 +39,11 @@ use core::ptr::addr_of;
 use core::{mem, ptr};
 use driver::acpi::{create_device_list, initialize_acpica};
 use driver::io::device_manager::DeviceManager;
-use driver::net::nic::rtl8139::Rtl8139;
 use hashbrown::HashMap;
 use kernel::set_kernel;
 use limine::paging::Mode;
 use limine::request::{
-    FramebufferRequest, HhdmRequest, KernelAddressRequest, MemoryMapRequest, PagingModeRequest,
+    FramebufferRequest, HhdmRequest, ExecutableAddressRequest, MemoryMapRequest, PagingModeRequest,
     RsdpRequest, StackSizeRequest,
 };
 use limine::BaseRevision;
@@ -93,7 +92,7 @@ static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(4 * 1024 * 1024); // 4 MiB
 
 #[used]
-static KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest::new();
+static KERNEL_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 static mut KERNEL_PAGE_TABLE: *mut PageTable = ptr::null_mut();
 static mut KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS: u64 = 0;
@@ -242,27 +241,15 @@ unsafe extern "C" fn _start() -> ! {
 
     set_kernel(Arc::clone(&kernel));
 
-    let mgr = DeviceManager::new();
-    mgr.enumerate_devices();
-
-    let pci_devices = Pci::build_device_tree();
-
     let bsp_lapic = LocalApic::initialize_for_current_processor(Arc::clone(&kernel));
     let pcb = cpu::ProcessorControlBlock::get_pcb_for_current_processor();
     (*pcb).is_bsp = true;
 
     _ = (*pcb).local_apic.set(bsp_lapic);
-    /*
-        pci_devices
-            .into_iter()
-            .filter(|dev| dev.device_id == 0x8139)
-            .for_each(|dev| {
-                let mut rtl8139 = Rtl8139::new(Arc::new(Mutex::new(dev)), Arc::clone(&kernel));
-                rtl8139.initialize();
-            });
-    */
 
-    loop {}
+    let mgr = DeviceManager::new();
+    mgr.enumerate_devices();
+
     kernel
         .apic
         .read()

@@ -1,4 +1,10 @@
-use crate::arch::x86::asm::{inb, inw, outb, outl};
+use crate::arch::x86::asm::{inb, inw, outb, outl, outw};
+use crate::driver::apic::{
+    DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode,
+};
+use crate::driver::io::device_manager::register_device_interrupt;
+use crate::driver::io::DriverId;
+use crate::kernel::kernel_ref;
 use crate::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE};
 use crate::{block_driver, bus_driver};
 use alloc::borrow::ToOwned;
@@ -12,6 +18,7 @@ use core::mem::transmute;
 use core::sync::atomic::Ordering;
 use deku::bitvec::{BitSlice, Msb0};
 use deku::{DekuError, DekuRead};
+use goblin::elf;
 use hashbrown::HashMap;
 use io::device_manager::DeviceRef;
 use io::{
@@ -141,7 +148,34 @@ impl AtaBusDriver {
         }
 
         // Poll until BSY bit clears
-        while (inb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) != 0 {}
+        let mut error = false;
+        loop {
+            let status = inb(io_base + ATA_REG_STATUS);
+            if (status & ATA_SR_ERR) != 0 {
+                // Disk is not valid ATA drive (can be valid ATAPI tho)
+                error = true;
+                break;
+            }
+            if (status & ATA_SR_BSY) == 0 && (status & ATA_SR_DRQ) != 0 {
+                // Valid ATA disk
+                break;
+            }
+        }
+
+        if error {
+            // Check if it's ATAPI drive
+            let lba1 = inb(io_base + ATA_REG_LBA1);
+            let lba2 = inb(io_base + ATA_REG_LBA2);
+
+            if (lba1 == 0x14 && lba2 == 0xEB) || (lba1 == 0x69 && lba2 == 0x96) {
+                // Valid ATAPI disk
+                debug!("Found valid ATAPI disk, skipping...");
+            } else {
+                // Invalid disk (not existent device?)
+            }
+
+            return None;
+        }
 
         // Read IDENTITY command response (it's not possible using DMA so need to use PIO mode)
         let mut identify_response = [0u16; (ATA_SECTOR_SIZE / 2) as usize];
@@ -222,6 +256,8 @@ impl BusDriver for AtaBusDriver {
             }
         }
 
+        debug!("Found {} ATA disks", disks.len());
+
         Ok(disks)
     }
 }
@@ -233,6 +269,7 @@ bus_driver!(AtaBusDriver);
 #[derive(Debug)]
 pub struct AtaDiskDriver {
     pub disks: RwLock<HashMap<DeviceId, AtaDiskState>>,
+    pub driver_id: DriverId,
 }
 
 #[derive(Debug)]
@@ -248,83 +285,12 @@ pub struct AtaDiskState {
 }
 
 impl AtaDiskDriver {
-    fn check_disk(bus: u8, drive: u8, controller: &Device) -> Option<Device> {
-        let io_base = match bus {
-            ATA_PRIMARY => ATA_PRIMARY_IO_PORT,
-            ATA_SECONDARY => ATA_SECONDARY_IO_PORT,
-            _ => unreachable!(),
-        };
-
-        // Select disk
-        outb(
-            io_base + ATA_REG_HDDEVSEL,
-            match drive {
-                ATA_MASTER => 0xA0,
-                ATA_SLAVE => 0xB0,
-                _ => unreachable!(),
-            },
-        );
-
-        // Zero some registers
-        outb(io_base + ATA_REG_SECCOUNT0, 0);
-        outb(io_base + ATA_REG_LBA0, 0);
-        outb(io_base + ATA_REG_LBA1, 0);
-        outb(io_base + ATA_REG_LBA2, 0);
-
-        // Send IDENTIFY command
-        outb(io_base + ATA_REG_COMMAND, ATA_CMD_IDENTIFY);
-
-        // Check if drive exists
-        if inb(io_base + ATA_REG_STATUS) == 0 {
-            return None;
-        }
-
-        // Poll until BSY bit clears
-        while (inb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) != 0 {}
-
-        // Read IDENTITY command response (it's not possible using DMA so need to use PIO mode)
-        let mut identify_response = [0u16; (ATA_SECTOR_SIZE / 2) as usize];
-        for i in 0..(ATA_SECTOR_SIZE / 2) as usize {
-            identify_response[i] = inw(io_base + ATA_REG_DATA);
-        }
-
-        let identify_response_as_bytes: [u8; 512] = unsafe { transmute(identify_response) };
-        let parsed_identify_response =
-            AtaIdentityResponse::try_from(identify_response_as_bytes.as_slice()).unwrap();
-
-        // We don't support disks without DMA or LBA addressing (LBA can be easily converted to CHS,
-        // but reading using PIO mode is so slow)
-        if parsed_identify_response.capabilities & ATA_CAPABILITY_DMA_LBA == 0 {
-            return None;
-        }
-
-        Some(Device {
-            id: unsafe { DEVICE_ID_COUNTER.fetch_add(1, Ordering::Relaxed) },
-            vendor_id: controller.vendor_id,
-            device_id: controller.device_id,
-            driver: None,
-            children: vec![], // lubie dzieci mmm dlaczego tu nie ma dzieci
-            properties: DeviceProperties::PCI {
-                address: {
-                    let DeviceProperties::PCI {
-                        address,
-                        inner_identificator: _,
-                    } = controller.properties;
-                    address
-                },
-                inner_identificator: ((bus as u64) << 8) | (drive as u64),
-            },
-            can_be_bus_controller: false,
-        })
-    }
-
     fn prepare_prdt(&self, prdt_page: u64, sector_count: usize, buffer: &[u8]) {
         const PRD_SIZE: usize = size_of::<PhysicalRegionDescriptor>();
 
         // Make sure PRDT will fit in one page frame. This effectively limits ATA reads to 512
         // sectors, or 256 KiB
         assert_eq!(PRD_SIZE, 8);
-        debug!("Seccount: {}", sector_count);
         assert!((sector_count * PRD_SIZE) < PAGE_SIZE);
 
         let prdt = prdt_page as *mut [PhysicalRegionDescriptor; PAGE_SIZE / PRD_SIZE];
@@ -335,7 +301,6 @@ impl AtaDiskDriver {
         let mut index = 0;
 
         loop {
-            debug!("LOOP");
             // Convert virtual address of buffer to physical address (they don't have to be
             // contiguous)
             let physical_address = memory_manager()
@@ -345,12 +310,9 @@ impl AtaDiskDriver {
                 )
                 .unwrap()
                 .as_u64();
-            debug!("Phys addr");
 
             // PRD allows DMA only to 32-bit physical addresses
             assert!(physical_address <= u32::MAX as u64);
-
-            debug!("assert");
 
             // Calculate bytes to transfer as minimum of (remaining bytes in this page) and
             // (remaining bytes of transfer)
@@ -363,7 +325,6 @@ impl AtaDiskDriver {
                 transfer_size: to_transfer as u16,
                 mark_end: 0,
             };
-            debug!("PRD");
 
             address += to_transfer;
             offset_within_page = address & 0xFFF;
@@ -379,14 +340,11 @@ impl AtaDiskDriver {
 
         // Mark last PRD as last entry in PRDT.
         unsafe { (*prdt)[index].mark_end = ATA_PRD_MARK_END };
-        debug!("Mark");
 
         assert_eq!(
             buffer.as_ptr().addr() + sector_count * ATA_SECTOR_SIZE as usize,
             address
         );
-
-        debug!("assert eq");
     }
 
     fn io_wait(&self, disk: &AtaDiskState) {
@@ -397,8 +355,6 @@ impl AtaDiskDriver {
             ATA_SECONDARY => self.get_io_base(disk) + disk.bar3 as u16 + 2, // For the secondary channel, ALTSTATUS/CONTROL port is BAR3 + 2.
             _ => unreachable!(),
         };
-
-        debug!("Port for wait: {} {}", port, disk.drive);
 
         for _ in 0..4 {
             _ = inb(port);
@@ -411,7 +367,6 @@ impl AtaDiskDriver {
             0x40 | (state.drive << 4),
         );
     }
-
     fn get_io_base(&self, state: &AtaDiskState) -> u16 {
         match state.bus {
             ATA_PRIMARY => ATA_PRIMARY_IO_PORT,
@@ -441,6 +396,21 @@ impl DriverBase for AtaDiskDriver {
             ATA_SECONDARY => ATA_SECONDARY_IO_PORT,
             _ => unreachable!(),
         };
+
+        let pci_device = device.to_pci_device().unwrap();
+        pci_device.enable_dma();
+
+        let mut bar1 = pci_device.get_bar(1);
+        let mut bar3 = pci_device.get_bar(3);
+        let mut bar4 = pci_device.get_bar(4);
+
+        if (bar4 & 0x1) != 1 {
+            // We dont support memory based accesses
+            return Err(DriverError::AttachFailed);
+        }
+
+        // Cut information bit from register address
+        bar4 &= 0xfffc;
 
         // Select disk
         outb(
@@ -494,22 +464,6 @@ impl DriverBase for AtaDiskDriver {
 
             frame
         };
-        debug!("PRDT PAGE: {:0x?}", prdt_page);
-
-        let pci_device = device.to_pci_device().unwrap();
-        pci_device.enable_dma();
-
-        let mut bar1 = pci_device.get_bar(1);
-        let mut bar3 = pci_device.get_bar(3);
-        let mut bar4 = pci_device.get_bar(4);
-
-        if (bar4 & 0x1) != 1 {
-            // We dont support memory based accesses
-            return Err(DriverError::AttachFailed);
-        }
-
-        // Cut information bit from register address
-        bar4 &= 0xfffc;
 
         let disk_state = AtaDiskState {
             bus,
@@ -545,8 +499,10 @@ impl DriverBase for AtaDiskDriver {
         ))
     }
 
-    fn initialize(&mut self, driver_id: io::DriverId) -> Result<(), DriverError> {
-        todo!()
+    fn initialize(&mut self, driver_id: DriverId) -> Result<(), DriverError> {
+        self.driver_id = driver_id;
+
+        Ok(())
     }
 
     fn deinitialize(&self) -> Result<(), DriverError> {
@@ -612,57 +568,45 @@ impl BlockDriver for AtaDiskDriver {
         let bmr_status_register = bmr_command_register + 2;
         let bmr_prdt_register = bmr_command_register + 4;
 
-        //info!("PreparePrdt");
         // Prepare PhysicalRegionDescriptor Table
         self.prepare_prdt(state.prdt_page, 1, slice);
 
-        //info!("SelectDrive");
         // Select drive
         //
         // We can do that because we don't support LBA48 (yet)
         // @TODO: Add support for LBA48
         self.select_drive(state);
 
-        //info!("ResetBMR");
         // Reset BMR command register
         outb(bmr_command_register, 0);
 
-        //info!("ClearInterrupt");
         // Clear interrupt and error bits in status register
         // This is weird register, because we clear bits by issuing write with these bits set.
         outb(bmr_status_register, inb(bmr_status_register) | 0x2 | 0x4);
 
-        //info!("SetPRDT");
         // Set PRDT entry (it's identity mapped)
         outl(bmr_prdt_register, state.prdt_page as u32);
 
-        //info!("SetDMAReadMode");
         // Set DMA in read mode
         outb(bmr_command_register, 0x8);
 
-        //info!("IOWait");
         self.io_wait(state);
 
-        //info!("AllowATA");
         // Allow ATA interrupts
         outb(io_base + ATA_REG_ALTSTATUS, 0);
 
-        //info!("SetFeatureError");
         // Set feature/error register to 0
         outb(io_base + ATA_REG_ERROR, 0);
 
-        //info!("SetSecCount");
         // Set sector count and LBA
         outb(io_base + ATA_REG_SECCOUNT0, 1 as u8);
         outb(io_base + ATA_REG_LBA0, block_id as u8);
         outb(io_base + ATA_REG_LBA1, (block_id >> 8) as u8);
         outb(io_base + ATA_REG_LBA2, (block_id >> 16) as u8);
 
-        //info!("WriteReadDMA");
         // Write the READ DMA to the command register
         outb(io_base + ATA_REG_COMMAND, ATA_CMD_READ_DMA);
 
-        //info!("StartReading");
         // Start DMA reading
         outb(bmr_command_register, 0x8 | 0x1);
 
