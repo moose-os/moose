@@ -1,6 +1,7 @@
 pub mod acpi;
 pub mod apic;
 pub mod ata;
+pub mod hv;
 pub mod io;
 pub mod net;
 pub mod pci;

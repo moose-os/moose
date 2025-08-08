@@ -25,6 +25,7 @@ mod terminal;
 mod vga;
 
 use crate::allocator::initialize_heap;
+use crate::driver::hv::hyperv::HyperV;
 use crate::driver::{pic::PIC, pit::PIT};
 use crate::memory::initialize_memory_manager;
 use crate::terminal::Terminal;
@@ -43,7 +44,7 @@ use hashbrown::HashMap;
 use kernel::set_kernel;
 use limine::paging::Mode;
 use limine::request::{
-    FramebufferRequest, HhdmRequest, ExecutableAddressRequest, MemoryMapRequest, PagingModeRequest,
+    ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest, PagingModeRequest,
     RsdpRequest, StackSizeRequest,
 };
 use limine::BaseRevision;
@@ -244,8 +245,13 @@ unsafe extern "C" fn _start() -> ! {
 
     _ = (*pcb).local_apic.set(bsp_lapic);
 
-    let mgr = DeviceManager::new();
-    mgr.enumerate_devices();
+    // let mgr = DeviceManager::new();
+    // mgr.enumerate_devices();
+    (*pcb).local_apic.get().unwrap().enable_timer();
+
+    kernel.hyperv.initialize_hv();
+    debug!("initialized");
+    loop {}
 
     kernel
         .apic

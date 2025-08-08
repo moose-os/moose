@@ -6,6 +6,7 @@ use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use crate::allocator::HEAP_START;
 use crate::driver::acpi::Acpi;
 use crate::driver::apic::Apic;
+use crate::driver::hv::hyperv::HyperV;
 use crate::driver::io::{Driver, DriverId};
 use crate::linker::Linker;
 use crate::memory::{
@@ -38,6 +39,7 @@ pub struct Kernel {
     processes: RwLock<Vec<Process>>,
     pub devices_interrupt_map: Mutex<HashMap<u8, Vec<DriverId>>>,
     pub drivers_map: Mutex<HashMap<DriverId, Arc<dyn Driver>>>,
+    pub hyperv: Arc<HyperV>,
 }
 
 impl Kernel {
@@ -65,6 +67,7 @@ impl Kernel {
             processes: RwLock::new(Vec::new()),
             devices_interrupt_map: Mutex::new(HashMap::new()),
             drivers_map: Mutex::new(HashMap::new()),
+            hyperv: Arc::new(HyperV::new()),
         };
 
         let mut processes = kernel.processes.write();

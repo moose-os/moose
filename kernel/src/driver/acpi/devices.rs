@@ -124,6 +124,7 @@ pub enum InterruptMode {
 struct Context {
     devices: Vec<DeviceHandle>,
     current: Option<DeviceHandle>,
+    current_method: Option<String>,
 }
 
 /// This functions scans the ACPI tables and returns a list of devices detected on the system.
@@ -134,6 +135,7 @@ pub fn create_device_list() -> Vec<DeviceHandle> {
     let mut context = Context {
         devices: Vec::new(),
         current: None,
+        current_method: None,
     };
 
     let status = unsafe {
@@ -170,16 +172,20 @@ extern "C" fn ascending_callback(
     );
 
     assert_ne!(device_info, null_mut());
+    assert_ne!(context, null_mut());
 
+    let context = unsafe { &mut *(context as *mut Context) };
     let device_info = unsafe { &*device_info };
+
+    match device_info.Type {
+        ACPI_TYPE_DEVICE => handle_device_object(object, device_info, context),
+        ACPI_TYPE_METHOD => handle_method_object(object, device_info, context),
+        _ => {}
+    };
 
     if device_info.Type != ACPI_TYPE_DEVICE {
         return AE_OK;
     }
-
-    assert_ne!(context, null_mut());
-
-    let context = unsafe { &mut *(context as *mut Context) };
 
     context.current = context
         .current
@@ -374,11 +380,17 @@ fn handle_method_object(
             }
         }
 
-        device.methods.push(Method {
-            name,
-            handle,
-            arg_count: device_info.ParamCount as usize,
-        });
+        if let Some(current_method) = &context.current_method {
+            if *current_method != name {
+                device.methods.push(Method {
+                    name: name.clone(),
+                    handle,
+                    arg_count: device_info.ParamCount as usize,
+                });
+            }
+        }
+
+        context.current_method = Some(name);
     }
 }
 

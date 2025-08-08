@@ -1,6 +1,6 @@
 use alloc::{boxed::Box, vec::Vec};
 use core::{arch::asm, ffi::CStr};
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use x86_64::{
     registers::control::Cr2,
     structures::{
