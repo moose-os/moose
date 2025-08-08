@@ -64,7 +64,7 @@ impl DeviceManager {
                 })
             ],
         );
-        class_to_driver_map.insert(
+        /*       class_to_driver_map.insert(
             PciDeviceClass::NetworkController(
                 PciDeviceClassNetworkControllerSubclass::EthernetController,
             ),
@@ -72,10 +72,10 @@ impl DeviceManager {
                 devices: RwLock::new(HashMap::new()),
                 driver_id: 2,
             }),],
-        );
+        );*/
 
         // @TODO: Need to register every driver in `drivers_map`, otherwise interrupts wont work.
-        kernel_ref().drivers_map.lock().insert(
+        /*     kernel_ref().drivers_map.lock().insert(
             2,
             class_to_driver_map
                 .get(&PciDeviceClass::NetworkController(
@@ -83,9 +83,9 @@ impl DeviceManager {
                 ))
                 .unwrap()[0]
                 .clone(),
-        );
+        );*/
 
-        let pci_devices = Pci::build_device_tree();
+        /* let pci_devices = Pci::build_device_tree();
         let mut devices = alloc::vec![];
 
         for dev in pci_devices {
@@ -109,10 +109,10 @@ impl DeviceManager {
 
         // @TODO: Take care of ACPI device tree here
         //
-        // let acpi_devices = create_device_list();
-        // for dev in acpi_devices {
-        //   debug!("Device :{:#?}", dev);
-        // }
+        //let acpi_devices = create_device_list();
+        //for dev in acpi_devices {
+        //    debug!("Device :{:#?}", dev);
+        //}
 
         fn callback(device: &Arc<Device>) {
             let mut driver = device.driver.clone().unwrap();
@@ -140,7 +140,7 @@ impl DeviceManager {
             }
 
             callback(device);
-        }
+        }*/
 
         self.register_interrupt_handlers();
     }
@@ -206,6 +206,7 @@ impl DeviceManager {
             register_interrupt_handler(
                 i,
                 Box::new(move |isf| {
+                    debug!("GOT INTERRUPT");
                     let kernel = kernel_ref();
                     if let Some(devices) = kernel.devices_interrupt_map.lock().get(&i) {
                         devices.iter().for_each(|device| {

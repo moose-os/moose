@@ -58,6 +58,33 @@ impl MemoryManager {
         first_frame
     }
 
+    pub unsafe fn allocate_and_map_frames_any_for_current_address_space(
+        &mut self,
+        n: usize,
+        page_flags: PageFlags,
+    ) -> Option<VirtualAddress> {
+        let first_allocated_frame = self.allocate_frames_contiguous(n)?;
+
+        let first_mapped_page =
+            self.map_any_for_current_address_space(&first_allocated_frame, page_flags);
+
+        for i in 1..n {
+            let offset = (i * PAGE_SIZE) as u64;
+
+            self.map_for_current_address_space(
+                &Page::new(VirtualAddress::new(
+                    first_mapped_page.address().as_u64() + offset,
+                )),
+                &Frame::new(PhysicalAddress::new(
+                    first_allocated_frame.address().as_u64() + offset,
+                )),
+                page_flags,
+            );
+        }
+
+        Some(first_mapped_page.address())
+    }
+
     pub unsafe fn map_for_current_address_space(
         &mut self,
         page: &Page,
@@ -1371,7 +1398,7 @@ impl VirtualAddress {
     }
 
     pub fn is_aligned_to(&self, alignment: u64) -> bool {
-        self.0 % alignment == 0
+        self.0.is_multiple_of(alignment)
     }
 
     #[inline]
@@ -1400,7 +1427,7 @@ impl PhysicalAddress {
     }
 
     pub fn is_aligned_to(&self, alignment: u64) -> bool {
-        self.0 % alignment == 0
+        self.0.is_multiple_of(alignment)
     }
 
     #[inline]
