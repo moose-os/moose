@@ -137,7 +137,7 @@ use crate::{
             synthetic_device::VmBusSyntheticDevice, HyperV, VmBusOfferChannel, VmBusPacketHeader,
             VmBusPacketType, VmBusXferPageHeader, HYPERV_PAGE_SIZE,
         },
-        net::{rndis::RndisDriver, EtherType, EthernetFrameHeader, Ipv4Header, MacAddress},
+        net::{EtherType, EthernetFrameHeader, Ipv4Header, MacAddress},
     },
     kernel::kernel_ref,
     memory::{self, memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress},
