@@ -1,5 +1,5 @@
 use crate::arch::x86::gdt::{GDT_DESCRIPTOR, TSS};
-use crate::arch::x86::idt::IDT;
+use crate::arch::x86::idt::{ExceptionFrame, IDT};
 use crate::arch::x86::use_kernel_page_table;
 use crate::cpu::ProcessorControlBlock;
 use crate::driver::pit::PIT;
@@ -16,7 +16,6 @@ use core::{
 use log::info;
 use spin::RwLock;
 use x86_64::registers::control::{Cr4, Cr4Flags};
-use x86_64::structures::idt::InterruptStackFrame;
 
 pub const LOCAL_APIC_LAPIC_ID_REGISTER: u32 = 0x20;
 pub const LOCAL_APIC_LAPIC_VERSION_REGISTER: u32 = 0x23;
@@ -245,9 +244,7 @@ impl LocalApic {
     }
 }
 
-pub extern "x86-interrupt" fn timer_interrupt_handler(
-    _interrupt_stack_frame: &InterruptStackFrame,
-) {
+pub extern "C" fn timer_interrupt_handler(_interrupt_stack_frame: &ExceptionFrame) {
     use_kernel_page_table(|| unsafe {
         _ = &(*ProcessorControlBlock::get_pcb_for_current_processor())
             .local_apic

@@ -37,7 +37,7 @@ impl Apic {
             "CPU does not support APIC"
         );
 
-        register_interrupt_handler(timer_irq, Box::new(|isf| timer_interrupt_handler(isf)));
+        //register_interrupt_handler(timer_irq, Box::new(|isf| timer_interrupt_handler(isf)));
 
         let io_apics = acpi
             .madt
