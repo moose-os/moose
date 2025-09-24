@@ -10,7 +10,7 @@ use crate::{
         irq::IrqLevel,
         x86::{
             asm::{inb, inw, outb, outl, outw},
-            idt::{register_interrupt_handler, ExceptionFrame},
+            idt::{register_interrupt_handler, ExceptionFrame, VolatileRegisters},
         },
     },
     cpu::ProcessorControlBlock,
@@ -137,9 +137,11 @@ impl Rtl8139 {
 
                 register_interrupt_handler(
                     irq,
-                    Box::new(move |_isf: &ExceptionFrame| {
-                        handle_rtl8139_interrupt(&mut inner.lock());
-                    }),
+                    Box::new(
+                        move |_isf: &ExceptionFrame, _registers: &VolatileRegisters| {
+                            handle_rtl8139_interrupt(&mut inner.lock());
+                        },
+                    ),
                 );
 
                 let redirection_entry = RedirectionEntry::new()

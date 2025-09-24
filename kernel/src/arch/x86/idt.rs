@@ -11,7 +11,7 @@ use super::{gdt::KERNEL_MODE_CODE_SEGMENT_INDEX, use_kernel_page_table};
 
 pub static mut IDT: Idt = Idt::new();
 
-type ExceptionHandler = dyn Fn(&ExceptionFrame);
+type ExceptionHandler = dyn Fn(&ExceptionFrame, &VolatileRegisters);
 
 static mut REGISTERED_INTERRUPT_HANDLERS: [Vec<Box<ExceptionHandler>>; 224] = {
     const DEFAULT: Vec<Box<ExceptionHandler>> = Vec::new();
@@ -22,7 +22,7 @@ static mut REGISTERED_INTERRUPT_HANDLERS: [Vec<Box<ExceptionHandler>>; 224] = {
 const SYSCALL_IRQ: u8 = 0x80;
 
 macro_rules! exception_handler {
-    ($name: ident) => {
+    ($name: expr) => {
         {
             #[unsafe(naked)]
             pub extern "C" fn raw_handler() -> ! {
@@ -40,6 +40,7 @@ macro_rules! exception_handler {
 
                         mov rdi, rsp
                         add rdi, 9 * 8
+                        mov rsi, rsp
 
                         call {}
 
@@ -154,677 +155,682 @@ pub fn init_idt() {
         // FPU error interrupt
 
         IDT.interrupts[0] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<0> as usize as u64,
+            (exception_handler!(interrupt_handler::<0>) as usize) as u64,
         );
         IDT.interrupts[1] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<1> as usize as u64,
+            (exception_handler!(interrupt_handler::<1>) as usize) as u64,
         );
         IDT.interrupts[2] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<2> as usize as u64,
+            (exception_handler!(interrupt_handler::<2>) as usize) as u64,
         );
         IDT.interrupts[3] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<3> as usize as u64,
+            (exception_handler!(interrupt_handler::<3>) as usize) as u64,
         );
         IDT.interrupts[4] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<4> as usize as u64,
+            (exception_handler!(interrupt_handler::<4>) as usize) as u64,
         );
         IDT.interrupts[5] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<5> as usize as u64,
+            (exception_handler!(interrupt_handler::<5>) as usize) as u64,
         );
         IDT.interrupts[6] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<6> as usize as u64,
+            (exception_handler!(interrupt_handler::<6>) as usize) as u64,
         );
         IDT.interrupts[7] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<7> as usize as u64,
+            (exception_handler!(interrupt_handler::<7>) as usize) as u64,
         );
         IDT.interrupts[8] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<8> as usize as u64,
+            (exception_handler!(interrupt_handler::<8>) as usize) as u64,
         );
         IDT.interrupts[9] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<9> as usize as u64,
+            (exception_handler!(interrupt_handler::<9>) as usize) as u64,
         );
         IDT.interrupts[10] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<10> as usize as u64,
+            (exception_handler!(interrupt_handler::<10>) as usize) as u64,
         );
         IDT.interrupts[11] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<11> as usize as u64,
+            (exception_handler!(interrupt_handler::<11>) as usize) as u64,
         );
         IDT.interrupts[12] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<12> as usize as u64,
+            (exception_handler!(interrupt_handler::<12>) as usize) as u64,
         );
         IDT.interrupts[13] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<13> as usize as u64,
+            (exception_handler!(interrupt_handler::<13>) as usize) as u64,
         );
         IDT.interrupts[14] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<14> as usize as u64,
+            (exception_handler!(interrupt_handler::<14>) as usize) as u64,
         );
         IDT.interrupts[15] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<15> as usize as u64,
+            (exception_handler!(interrupt_handler::<15>) as usize) as u64,
         );
         IDT.interrupts[16] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<16> as usize as u64,
+            (exception_handler!(interrupt_handler::<16>) as usize) as u64,
         );
         IDT.interrupts[17] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<17> as usize as u64,
+            (exception_handler!(interrupt_handler::<17>) as usize) as u64,
         );
         IDT.interrupts[18] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<18> as usize as u64,
+            (exception_handler!(interrupt_handler::<18>) as usize) as u64,
         );
         IDT.interrupts[19] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<19> as usize as u64,
+            (exception_handler!(interrupt_handler::<19>) as usize) as u64,
         );
         IDT.interrupts[20] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<20> as usize as u64,
+            (exception_handler!(interrupt_handler::<20>) as usize) as u64,
         );
         IDT.interrupts[21] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<21> as usize as u64,
+            (exception_handler!(interrupt_handler::<21>) as usize) as u64,
         );
         IDT.interrupts[22] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<22> as usize as u64,
+            (exception_handler!(interrupt_handler::<22>) as usize) as u64,
         );
         IDT.interrupts[23] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<23> as usize as u64,
+            (exception_handler!(interrupt_handler::<23>) as usize) as u64,
         );
         IDT.interrupts[24] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<24> as usize as u64,
+            (exception_handler!(interrupt_handler::<24>) as usize) as u64,
         );
         IDT.interrupts[25] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<25> as usize as u64,
+            (exception_handler!(interrupt_handler::<25>) as usize) as u64,
         );
         IDT.interrupts[26] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<26> as usize as u64,
+            (exception_handler!(interrupt_handler::<26>) as usize) as u64,
         );
         IDT.interrupts[27] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<27> as usize as u64,
+            (exception_handler!(interrupt_handler::<27>) as usize) as u64,
         );
         IDT.interrupts[28] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<28> as usize as u64,
+            (exception_handler!(interrupt_handler::<28>) as usize) as u64,
         );
         IDT.interrupts[29] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<29> as usize as u64,
+            (exception_handler!(interrupt_handler::<29>) as usize) as u64,
         );
         IDT.interrupts[30] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<30> as usize as u64,
+            (exception_handler!(interrupt_handler::<30>) as usize) as u64,
         );
         IDT.interrupts[31] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<31> as usize as u64,
+            (exception_handler!(interrupt_handler::<31>) as usize) as u64,
         );
         IDT.interrupts[32] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<32> as usize as u64,
+            (exception_handler!(interrupt_handler::<32>) as usize) as u64,
         );
         IDT.interrupts[33] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<33> as usize as u64,
+            (exception_handler!(interrupt_handler::<33>) as usize) as u64,
         );
         IDT.interrupts[34] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<34> as usize as u64,
+            (exception_handler!(interrupt_handler::<34>) as usize) as u64,
         );
         IDT.interrupts[35] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<35> as usize as u64,
+            (exception_handler!(interrupt_handler::<35>) as usize) as u64,
         );
         IDT.interrupts[36] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<36> as usize as u64,
+            (exception_handler!(interrupt_handler::<36>) as usize) as u64,
         );
         IDT.interrupts[37] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<37> as usize as u64,
+            (exception_handler!(interrupt_handler::<37>) as usize) as u64,
         );
         IDT.interrupts[38] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<38> as usize as u64,
+            (exception_handler!(interrupt_handler::<38>) as usize) as u64,
         );
         IDT.interrupts[39] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<39> as usize as u64,
+            (exception_handler!(interrupt_handler::<39>) as usize) as u64,
         );
         IDT.interrupts[40] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<40> as usize as u64,
+            (exception_handler!(interrupt_handler::<40>) as usize) as u64,
         );
         IDT.interrupts[41] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<41> as usize as u64,
+            (exception_handler!(interrupt_handler::<41>) as usize) as u64,
         );
         IDT.interrupts[42] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<42> as usize as u64,
+            (exception_handler!(interrupt_handler::<42>) as usize) as u64,
         );
         IDT.interrupts[43] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<43> as usize as u64,
+            (exception_handler!(interrupt_handler::<43>) as usize) as u64,
         );
         IDT.interrupts[44] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<44> as usize as u64,
+            (exception_handler!(interrupt_handler::<44>) as usize) as u64,
         );
         IDT.interrupts[45] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<45> as usize as u64,
+            (exception_handler!(interrupt_handler::<45>) as usize) as u64,
         );
         IDT.interrupts[46] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<46> as usize as u64,
+            (exception_handler!(interrupt_handler::<46>) as usize) as u64,
         );
         IDT.interrupts[47] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<47> as usize as u64,
+            (exception_handler!(interrupt_handler::<47>) as usize) as u64,
         );
         IDT.interrupts[48] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<48> as usize as u64,
+            (exception_handler!(interrupt_handler::<48>) as usize) as u64,
         );
         IDT.interrupts[49] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<49> as usize as u64,
+            (exception_handler!(interrupt_handler::<49>) as usize) as u64,
         );
         IDT.interrupts[50] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<50> as usize as u64,
+            (exception_handler!(interrupt_handler::<50>) as usize) as u64,
         );
         IDT.interrupts[51] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<51> as usize as u64,
+            (exception_handler!(interrupt_handler::<51>) as usize) as u64,
         );
         IDT.interrupts[52] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<52> as usize as u64,
+            (exception_handler!(interrupt_handler::<52>) as usize) as u64,
         );
         IDT.interrupts[53] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<53> as usize as u64,
+            (exception_handler!(interrupt_handler::<53>) as usize) as u64,
         );
         IDT.interrupts[54] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<54> as usize as u64,
+            (exception_handler!(interrupt_handler::<54>) as usize) as u64,
         );
         IDT.interrupts[55] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<55> as usize as u64,
+            (exception_handler!(interrupt_handler::<55>) as usize) as u64,
         );
         IDT.interrupts[56] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<56> as usize as u64,
+            (exception_handler!(interrupt_handler::<56>) as usize) as u64,
         );
         IDT.interrupts[57] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<57> as usize as u64,
+            (exception_handler!(interrupt_handler::<57>) as usize) as u64,
         );
         IDT.interrupts[58] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<58> as usize as u64,
+            (exception_handler!(interrupt_handler::<58>) as usize) as u64,
         );
         IDT.interrupts[59] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<59> as usize as u64,
+            (exception_handler!(interrupt_handler::<59>) as usize) as u64,
         );
         IDT.interrupts[60] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<60> as usize as u64,
+            (exception_handler!(interrupt_handler::<60>) as usize) as u64,
         );
         IDT.interrupts[61] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<61> as usize as u64,
+            (exception_handler!(interrupt_handler::<61>) as usize) as u64,
         );
         IDT.interrupts[62] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<62> as usize as u64,
+            (exception_handler!(interrupt_handler::<62>) as usize) as u64,
         );
         IDT.interrupts[63] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<63> as usize as u64,
+            (exception_handler!(interrupt_handler::<63>) as usize) as u64,
         );
         IDT.interrupts[64] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<64> as usize as u64,
+            (exception_handler!(interrupt_handler::<64>) as usize) as u64,
         );
         IDT.interrupts[65] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<65> as usize as u64,
+            (exception_handler!(interrupt_handler::<65>) as usize) as u64,
         );
         IDT.interrupts[66] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<66> as usize as u64,
+            (exception_handler!(interrupt_handler::<66>) as usize) as u64,
         );
         IDT.interrupts[67] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<67> as usize as u64,
+            (exception_handler!(interrupt_handler::<67>) as usize) as u64,
         );
         IDT.interrupts[68] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<68> as usize as u64,
+            (exception_handler!(interrupt_handler::<68>) as usize) as u64,
         );
         IDT.interrupts[69] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<69> as usize as u64,
+            (exception_handler!(interrupt_handler::<69>) as usize) as u64,
         );
         IDT.interrupts[70] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<70> as usize as u64,
+            (exception_handler!(interrupt_handler::<70>) as usize) as u64,
         );
         IDT.interrupts[71] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<71> as usize as u64,
+            (exception_handler!(interrupt_handler::<71>) as usize) as u64,
         );
         IDT.interrupts[72] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<72> as usize as u64,
+            (exception_handler!(interrupt_handler::<72>) as usize) as u64,
         );
         IDT.interrupts[73] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<73> as usize as u64,
+            (exception_handler!(interrupt_handler::<73>) as usize) as u64,
         );
         IDT.interrupts[74] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<74> as usize as u64,
+            (exception_handler!(interrupt_handler::<74>) as usize) as u64,
         );
         IDT.interrupts[75] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<75> as usize as u64,
+            (exception_handler!(interrupt_handler::<75>) as usize) as u64,
         );
         IDT.interrupts[76] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<76> as usize as u64,
+            (exception_handler!(interrupt_handler::<76>) as usize) as u64,
         );
         IDT.interrupts[77] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<77> as usize as u64,
+            (exception_handler!(interrupt_handler::<77>) as usize) as u64,
         );
         IDT.interrupts[78] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<78> as usize as u64,
+            (exception_handler!(interrupt_handler::<78>) as usize) as u64,
         );
         IDT.interrupts[79] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<79> as usize as u64,
+            (exception_handler!(interrupt_handler::<79>) as usize) as u64,
         );
         IDT.interrupts[80] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<80> as usize as u64,
+            (exception_handler!(interrupt_handler::<80>) as usize) as u64,
         );
         IDT.interrupts[81] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<81> as usize as u64,
+            (exception_handler!(interrupt_handler::<81>) as usize) as u64,
         );
         IDT.interrupts[82] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<82> as usize as u64,
+            (exception_handler!(interrupt_handler::<82>) as usize) as u64,
         );
         IDT.interrupts[83] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<83> as usize as u64,
+            (exception_handler!(interrupt_handler::<83>) as usize) as u64,
         );
         IDT.interrupts[84] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<84> as usize as u64,
+            (exception_handler!(interrupt_handler::<84>) as usize) as u64,
         );
         IDT.interrupts[85] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<85> as usize as u64,
+            (exception_handler!(interrupt_handler::<85>) as usize) as u64,
         );
         IDT.interrupts[86] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<86> as usize as u64,
+            (exception_handler!(interrupt_handler::<86>) as usize) as u64,
         );
         IDT.interrupts[87] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<87> as usize as u64,
+            (exception_handler!(interrupt_handler::<87>) as usize) as u64,
         );
         IDT.interrupts[88] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<88> as usize as u64,
+            (exception_handler!(interrupt_handler::<88>) as usize) as u64,
         );
         IDT.interrupts[89] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<89> as usize as u64,
+            (exception_handler!(interrupt_handler::<89>) as usize) as u64,
         );
         IDT.interrupts[90] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<90> as usize as u64,
+            (exception_handler!(interrupt_handler::<90>) as usize) as u64,
         );
         IDT.interrupts[91] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<91> as usize as u64,
+            (exception_handler!(interrupt_handler::<91>) as usize) as u64,
         );
         IDT.interrupts[92] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<92> as usize as u64,
+            (exception_handler!(interrupt_handler::<92>) as usize) as u64,
         );
         IDT.interrupts[93] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<93> as usize as u64,
+            (exception_handler!(interrupt_handler::<93>) as usize) as u64,
         );
         IDT.interrupts[94] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<94> as usize as u64,
+            (exception_handler!(interrupt_handler::<94>) as usize) as u64,
         );
         IDT.interrupts[95] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<95> as usize as u64,
+            (exception_handler!(interrupt_handler::<95>) as usize) as u64,
         );
         IDT.interrupts[96] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<96> as usize as u64,
+            (exception_handler!(interrupt_handler::<96>) as usize) as u64,
         );
         IDT.interrupts[97] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<97> as usize as u64,
+            (exception_handler!(interrupt_handler::<97>) as usize) as u64,
         );
         IDT.interrupts[98] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<98> as usize as u64,
+            (exception_handler!(interrupt_handler::<98>) as usize) as u64,
         );
         IDT.interrupts[99] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<99> as usize as u64,
+            (exception_handler!(interrupt_handler::<99>) as usize) as u64,
         );
         IDT.interrupts[100] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<100> as usize as u64,
+            (exception_handler!(interrupt_handler::<100>) as usize) as u64,
         );
         IDT.interrupts[101] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<101> as usize as u64,
+            (exception_handler!(interrupt_handler::<101>) as usize) as u64,
         );
         IDT.interrupts[102] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<102> as usize as u64,
+            (exception_handler!(interrupt_handler::<102>) as usize) as u64,
         );
         IDT.interrupts[103] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<103> as usize as u64,
+            (exception_handler!(interrupt_handler::<103>) as usize) as u64,
         );
         IDT.interrupts[104] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<104> as usize as u64,
+            (exception_handler!(interrupt_handler::<104>) as usize) as u64,
         );
         IDT.interrupts[105] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<105> as usize as u64,
+            (exception_handler!(interrupt_handler::<105>) as usize) as u64,
         );
         IDT.interrupts[106] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<106> as usize as u64,
+            (exception_handler!(interrupt_handler::<106>) as usize) as u64,
         );
         IDT.interrupts[107] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<107> as usize as u64,
+            (exception_handler!(interrupt_handler::<107>) as usize) as u64,
         );
         IDT.interrupts[108] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<108> as usize as u64,
+            (exception_handler!(interrupt_handler::<108>) as usize) as u64,
         );
         IDT.interrupts[109] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<109> as usize as u64,
+            (exception_handler!(interrupt_handler::<109>) as usize) as u64,
         );
         IDT.interrupts[110] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<110> as usize as u64,
+            (exception_handler!(interrupt_handler::<110>) as usize) as u64,
         );
         IDT.interrupts[111] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<111> as usize as u64,
+            (exception_handler!(interrupt_handler::<111>) as usize) as u64,
         );
         IDT.interrupts[112] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<112> as usize as u64,
+            (exception_handler!(interrupt_handler::<112>) as usize) as u64,
         );
         IDT.interrupts[113] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<113> as usize as u64,
+            (exception_handler!(interrupt_handler::<113>) as usize) as u64,
         );
         IDT.interrupts[114] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<114> as usize as u64,
+            (exception_handler!(interrupt_handler::<114>) as usize) as u64,
         );
         IDT.interrupts[115] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<115> as usize as u64,
+            (exception_handler!(interrupt_handler::<115>) as usize) as u64,
         );
         IDT.interrupts[116] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<116> as usize as u64,
+            (exception_handler!(interrupt_handler::<116>) as usize) as u64,
         );
         IDT.interrupts[117] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<117> as usize as u64,
+            (exception_handler!(interrupt_handler::<117>) as usize) as u64,
         );
         IDT.interrupts[118] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<118> as usize as u64,
+            (exception_handler!(interrupt_handler::<118>) as usize) as u64,
         );
         IDT.interrupts[119] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<119> as usize as u64,
+            (exception_handler!(interrupt_handler::<119>) as usize) as u64,
         );
         IDT.interrupts[120] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<120> as usize as u64,
+            (exception_handler!(interrupt_handler::<120>) as usize) as u64,
         );
         IDT.interrupts[121] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<121> as usize as u64,
+            (exception_handler!(interrupt_handler::<121>) as usize) as u64,
         );
         IDT.interrupts[122] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<122> as usize as u64,
+            (exception_handler!(interrupt_handler::<122>) as usize) as u64,
         );
         IDT.interrupts[123] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<123> as usize as u64,
+            (exception_handler!(interrupt_handler::<123>) as usize) as u64,
         );
         IDT.interrupts[124] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<124> as usize as u64,
+            (exception_handler!(interrupt_handler::<124>) as usize) as u64,
         );
         IDT.interrupts[125] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<125> as usize as u64,
+            (exception_handler!(interrupt_handler::<125>) as usize) as u64,
         );
         IDT.interrupts[126] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<126> as usize as u64,
+            (exception_handler!(interrupt_handler::<126>) as usize) as u64,
         );
         IDT.interrupts[127] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<127> as usize as u64,
+            (exception_handler!(interrupt_handler::<127>) as usize) as u64,
         );
         IDT.interrupts[128] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<128> as usize as u64,
+            (exception_handler!(interrupt_handler::<128>) as usize) as u64,
         );
         IDT.interrupts[129] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<129> as usize as u64,
+            (exception_handler!(interrupt_handler::<129>) as usize) as u64,
         );
         IDT.interrupts[130] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<130> as usize as u64,
+            (exception_handler!(interrupt_handler::<130>) as usize) as u64,
         );
         IDT.interrupts[131] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<131> as usize as u64,
+            (exception_handler!(interrupt_handler::<131>) as usize) as u64,
         );
         IDT.interrupts[132] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<132> as usize as u64,
+            (exception_handler!(interrupt_handler::<132>) as usize) as u64,
         );
         IDT.interrupts[133] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<133> as usize as u64,
+            (exception_handler!(interrupt_handler::<133>) as usize) as u64,
         );
         IDT.interrupts[134] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<134> as usize as u64,
+            (exception_handler!(interrupt_handler::<134>) as usize) as u64,
         );
         IDT.interrupts[135] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<135> as usize as u64,
+            (exception_handler!(interrupt_handler::<135>) as usize) as u64,
         );
         IDT.interrupts[136] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<136> as usize as u64,
+            (exception_handler!(interrupt_handler::<136>) as usize) as u64,
         );
         IDT.interrupts[137] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<137> as usize as u64,
+            (exception_handler!(interrupt_handler::<137>) as usize) as u64,
         );
         IDT.interrupts[138] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<138> as usize as u64,
+            (exception_handler!(interrupt_handler::<138>) as usize) as u64,
         );
         IDT.interrupts[139] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<139> as usize as u64,
+            (exception_handler!(interrupt_handler::<139>) as usize) as u64,
         );
         IDT.interrupts[140] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<140> as usize as u64,
+            (exception_handler!(interrupt_handler::<140>) as usize) as u64,
         );
         IDT.interrupts[141] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<141> as usize as u64,
+            (exception_handler!(interrupt_handler::<141>) as usize) as u64,
         );
         IDT.interrupts[142] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<142> as usize as u64,
+            (exception_handler!(interrupt_handler::<142>) as usize) as u64,
         );
         IDT.interrupts[143] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<143> as usize as u64,
+            (exception_handler!(interrupt_handler::<143>) as usize) as u64,
         );
         IDT.interrupts[144] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<144> as usize as u64,
+            (exception_handler!(interrupt_handler::<144>) as usize) as u64,
         );
         IDT.interrupts[145] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<145> as usize as u64,
+            (exception_handler!(interrupt_handler::<145>) as usize) as u64,
         );
         IDT.interrupts[146] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<146> as usize as u64,
+            (exception_handler!(interrupt_handler::<146>) as usize) as u64,
         );
         IDT.interrupts[147] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<147> as usize as u64,
+            (exception_handler!(interrupt_handler::<147>) as usize) as u64,
         );
         IDT.interrupts[148] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<148> as usize as u64,
+            (exception_handler!(interrupt_handler::<148>) as usize) as u64,
         );
         IDT.interrupts[149] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<149> as usize as u64,
+            (exception_handler!(interrupt_handler::<149>) as usize) as u64,
         );
         IDT.interrupts[150] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<150> as usize as u64,
+            (exception_handler!(interrupt_handler::<150>) as usize) as u64,
         );
         IDT.interrupts[151] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<151> as usize as u64,
+            (exception_handler!(interrupt_handler::<151>) as usize) as u64,
         );
         IDT.interrupts[152] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<152> as usize as u64,
+            (exception_handler!(interrupt_handler::<152>) as usize) as u64,
         );
         IDT.interrupts[153] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<153> as usize as u64,
+            (exception_handler!(interrupt_handler::<153>) as usize) as u64,
         );
         IDT.interrupts[154] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<154> as usize as u64,
+            (exception_handler!(interrupt_handler::<154>) as usize) as u64,
         );
         IDT.interrupts[155] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<155> as usize as u64,
+            (exception_handler!(interrupt_handler::<155>) as usize) as u64,
         );
         IDT.interrupts[156] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<156> as usize as u64,
+            (exception_handler!(interrupt_handler::<156>) as usize) as u64,
         );
         IDT.interrupts[157] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<157> as usize as u64,
+            (exception_handler!(interrupt_handler::<157>) as usize) as u64,
         );
         IDT.interrupts[158] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<158> as usize as u64,
+            (exception_handler!(interrupt_handler::<158>) as usize) as u64,
         );
         IDT.interrupts[159] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<159> as usize as u64,
+            (exception_handler!(interrupt_handler::<159>) as usize) as u64,
         );
         IDT.interrupts[160] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<160> as usize as u64,
+            (exception_handler!(interrupt_handler::<160>) as usize) as u64,
         );
         IDT.interrupts[161] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<161> as usize as u64,
+            (exception_handler!(interrupt_handler::<161>) as usize) as u64,
         );
         IDT.interrupts[162] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<162> as usize as u64,
+            (exception_handler!(interrupt_handler::<162>) as usize) as u64,
         );
         IDT.interrupts[163] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<163> as usize as u64,
+            (exception_handler!(interrupt_handler::<163>) as usize) as u64,
         );
         IDT.interrupts[164] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<164> as usize as u64,
+            (exception_handler!(interrupt_handler::<164>) as usize) as u64,
         );
         IDT.interrupts[165] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<165> as usize as u64,
+            (exception_handler!(interrupt_handler::<165>) as usize) as u64,
         );
         IDT.interrupts[166] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<166> as usize as u64,
+            (exception_handler!(interrupt_handler::<166>) as usize) as u64,
         );
         IDT.interrupts[167] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<167> as usize as u64,
+            (exception_handler!(interrupt_handler::<167>) as usize) as u64,
         );
         IDT.interrupts[168] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<168> as usize as u64,
+            (exception_handler!(interrupt_handler::<168>) as usize) as u64,
         );
         IDT.interrupts[169] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<169> as usize as u64,
+            (exception_handler!(interrupt_handler::<169>) as usize) as u64,
         );
         IDT.interrupts[170] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<170> as usize as u64,
+            (exception_handler!(interrupt_handler::<170>) as usize) as u64,
         );
         IDT.interrupts[171] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<171> as usize as u64,
+            (exception_handler!(interrupt_handler::<171>) as usize) as u64,
         );
         IDT.interrupts[172] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<172> as usize as u64,
+            (exception_handler!(interrupt_handler::<172>) as usize) as u64,
         );
         IDT.interrupts[173] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<173> as usize as u64,
+            (exception_handler!(interrupt_handler::<173>) as usize) as u64,
         );
         IDT.interrupts[174] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<174> as usize as u64,
+            (exception_handler!(interrupt_handler::<174>) as usize) as u64,
         );
         IDT.interrupts[175] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<175> as usize as u64,
+            (exception_handler!(interrupt_handler::<175>) as usize) as u64,
         );
         IDT.interrupts[176] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<176> as usize as u64,
+            (exception_handler!(interrupt_handler::<176>) as usize) as u64,
         );
         IDT.interrupts[177] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<177> as usize as u64,
+            (exception_handler!(interrupt_handler::<177>) as usize) as u64,
         );
         IDT.interrupts[178] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<178> as usize as u64,
+            (exception_handler!(interrupt_handler::<178>) as usize) as u64,
         );
         IDT.interrupts[179] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<179> as usize as u64,
+            (exception_handler!(interrupt_handler::<179>) as usize) as u64,
         );
         IDT.interrupts[180] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<180> as usize as u64,
+            (exception_handler!(interrupt_handler::<180>) as usize) as u64,
         );
         IDT.interrupts[181] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<181> as usize as u64,
+            (exception_handler!(interrupt_handler::<181>) as usize) as u64,
         );
         IDT.interrupts[182] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<182> as usize as u64,
+            (exception_handler!(interrupt_handler::<182>) as usize) as u64,
         );
         IDT.interrupts[183] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<183> as usize as u64,
+            (exception_handler!(interrupt_handler::<183>) as usize) as u64,
         );
         IDT.interrupts[184] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<184> as usize as u64,
+            (exception_handler!(interrupt_handler::<184>) as usize) as u64,
         );
         IDT.interrupts[185] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<185> as usize as u64,
+            (exception_handler!(interrupt_handler::<185>) as usize) as u64,
         );
         IDT.interrupts[186] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<186> as usize as u64,
+            (exception_handler!(interrupt_handler::<186>) as usize) as u64,
         );
         IDT.interrupts[187] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<187> as usize as u64,
+            (exception_handler!(interrupt_handler::<187>) as usize) as u64,
         );
         IDT.interrupts[188] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<188> as usize as u64,
+            (exception_handler!(interrupt_handler::<188>) as usize) as u64,
         );
         IDT.interrupts[189] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<189> as usize as u64,
+            (exception_handler!(interrupt_handler::<189>) as usize) as u64,
         );
         IDT.interrupts[190] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<190> as usize as u64,
+            (exception_handler!(interrupt_handler::<190>) as usize) as u64,
         );
         IDT.interrupts[191] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<191> as usize as u64,
+            (exception_handler!(interrupt_handler::<191>) as usize) as u64,
         );
         IDT.interrupts[192] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<192> as usize as u64,
+            (exception_handler!(interrupt_handler::<192>) as usize) as u64,
         );
         IDT.interrupts[193] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<193> as usize as u64,
+            (exception_handler!(interrupt_handler::<193>) as usize) as u64,
         );
         IDT.interrupts[194] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<194> as usize as u64,
+            (exception_handler!(interrupt_handler::<194>) as usize) as u64,
         );
         IDT.interrupts[195] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<195> as usize as u64,
+            (exception_handler!(interrupt_handler::<195>) as usize) as u64,
         );
         IDT.interrupts[196] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<196> as usize as u64,
+            (exception_handler!(interrupt_handler::<196>) as usize) as u64,
         );
         IDT.interrupts[197] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<197> as usize as u64,
+            (exception_handler!(interrupt_handler::<197>) as usize) as u64,
         );
         IDT.interrupts[198] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<198> as usize as u64,
+            (exception_handler!(interrupt_handler::<198>) as usize) as u64,
         );
         IDT.interrupts[199] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<199> as usize as u64,
+            (exception_handler!(interrupt_handler::<199>) as usize) as u64,
         );
         IDT.interrupts[200] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<200> as usize as u64,
+            (exception_handler!(interrupt_handler::<200>) as usize) as u64,
         );
         IDT.interrupts[201] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<201> as usize as u64,
+            (exception_handler!(interrupt_handler::<201>) as usize) as u64,
         );
         IDT.interrupts[202] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<202> as usize as u64,
+            (exception_handler!(interrupt_handler::<202>) as usize) as u64,
         );
         IDT.interrupts[203] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<203> as usize as u64,
+            (exception_handler!(interrupt_handler::<203>) as usize) as u64,
         );
         IDT.interrupts[204] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<204> as usize as u64,
+            (exception_handler!(interrupt_handler::<204>) as usize) as u64,
         );
         IDT.interrupts[205] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<205> as usize as u64,
+            (exception_handler!(interrupt_handler::<205>) as usize) as u64,
         );
         IDT.interrupts[206] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<206> as usize as u64,
+            (exception_handler!(interrupt_handler::<206>) as usize) as u64,
         );
         IDT.interrupts[207] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<207> as usize as u64,
+            (exception_handler!(interrupt_handler::<207>) as usize) as u64,
         );
         IDT.interrupts[208] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<208> as usize as u64,
+            (exception_handler!(interrupt_handler::<208>) as usize) as u64,
         );
         IDT.interrupts[209] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<209> as usize as u64,
+            (exception_handler!(interrupt_handler::<209>) as usize) as u64,
         );
         IDT.interrupts[210] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<210> as usize as u64,
+            (exception_handler!(interrupt_handler::<210>) as usize) as u64,
         );
         IDT.interrupts[211] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<211> as usize as u64,
+            (exception_handler!(interrupt_handler::<211>) as usize) as u64,
         );
         IDT.interrupts[212] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<212> as usize as u64,
+            (exception_handler!(interrupt_handler::<212>) as usize) as u64,
         );
         IDT.interrupts[213] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<213> as usize as u64,
+            (exception_handler!(interrupt_handler::<213>) as usize) as u64,
         );
         IDT.interrupts[214] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<214> as usize as u64,
+            (exception_handler!(interrupt_handler::<214>) as usize) as u64,
         );
         IDT.interrupts[215] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<215> as usize as u64,
+            (exception_handler!(interrupt_handler::<215>) as usize) as u64,
         );
         IDT.interrupts[216] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<216> as usize as u64,
+            (exception_handler!(interrupt_handler::<216>) as usize) as u64,
         );
         IDT.interrupts[217] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<217> as usize as u64,
+            (exception_handler!(interrupt_handler::<217>) as usize) as u64,
         );
         IDT.interrupts[218] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<218> as usize as u64,
+            (exception_handler!(interrupt_handler::<218>) as usize) as u64,
         );
         IDT.interrupts[219] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<219> as usize as u64,
+            (exception_handler!(interrupt_handler::<219>) as usize) as u64,
         );
         IDT.interrupts[220] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<220> as usize as u64,
+            (exception_handler!(interrupt_handler::<220>) as usize) as u64,
         );
         IDT.interrupts[221] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<221> as usize as u64,
+            (exception_handler!(interrupt_handler::<221>) as usize) as u64,
         );
         IDT.interrupts[222] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<222> as usize as u64,
+            (exception_handler!(interrupt_handler::<222>) as usize) as u64,
         );
         IDT.interrupts[223] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-            interrupt_handler::<223> as usize as u64,
+            (exception_handler!(interrupt_handler::<223>) as usize) as u64,
         );
+
+        IDT.interrupts[SYSCALL_IRQ as usize - 32] =
+            IdtEntry::kernel_mode_ring3_accessible_interrupt(
+                exception_handler!(syscall_handler) as usize as u64
+            );
 
         IDT.load();
     }
@@ -1545,7 +1551,20 @@ pub struct ErrorCodeExceptionFrame {
     ss: usize,
 }
 
-pub fn register_interrupt_handler(n: u8, handler: Box<dyn Fn(&ExceptionFrame)>) {
+#[repr(C, packed)]
+pub struct VolatileRegisters {
+    r11: usize,
+    r10: usize,
+    r9: usize,
+    r8: usize,
+    rdi: usize,
+    rsi: usize,
+    rdx: usize,
+    rcx: usize,
+    rax: usize,
+}
+
+pub fn register_interrupt_handler(n: u8, handler: Box<ExceptionHandler>) {
     assert!(n != SYSCALL_IRQ);
 
     unsafe {
@@ -1553,17 +1572,20 @@ pub fn register_interrupt_handler(n: u8, handler: Box<dyn Fn(&ExceptionFrame)>) 
     }
 }
 
-extern "C" fn interrupt_handler<const N: usize>(frame: &ExceptionFrame) {
+extern "C" fn interrupt_handler<const N: usize>(
+    frame: &ExceptionFrame,
+    registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         let interrupt_handlers = unsafe { &REGISTERED_INTERRUPT_HANDLERS[N] };
 
         for interrupt_handler in interrupt_handlers {
-            interrupt_handler(frame);
+            interrupt_handler(frame, registers);
         }
     });
 }
 
-extern "C" fn division_error_handler(frame: &ExceptionFrame) {
+extern "C" fn division_error_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         warn!("Division error");
 
@@ -1575,7 +1597,7 @@ extern "C" fn division_error_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn debug_handler(frame: &ExceptionFrame) {
+extern "C" fn debug_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         info!("Debug");
 
@@ -1583,7 +1605,10 @@ extern "C" fn debug_handler(frame: &ExceptionFrame) {
     });
 }
 
-extern "C" fn non_maskable_interrupt_handler(frame: &ExceptionFrame) {
+extern "C" fn non_maskable_interrupt_handler(
+    frame: &ExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         info!("Non-maskable interrupt");
 
@@ -1591,7 +1616,7 @@ extern "C" fn non_maskable_interrupt_handler(frame: &ExceptionFrame) {
     });
 }
 
-extern "C" fn breakpoint_handler(frame: &ExceptionFrame) {
+extern "C" fn breakpoint_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         info!("Breakpoint");
 
@@ -1599,7 +1624,7 @@ extern "C" fn breakpoint_handler(frame: &ExceptionFrame) {
     });
 }
 
-extern "C" fn overflow_handler(frame: &ExceptionFrame) {
+extern "C" fn overflow_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         warn!("Overflow");
 
@@ -1611,7 +1636,7 @@ extern "C" fn overflow_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn bound_range_exceeded_handler(frame: &ExceptionFrame) {
+extern "C" fn bound_range_exceeded_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         warn!("Bound range exceeded");
 
@@ -1623,7 +1648,7 @@ extern "C" fn bound_range_exceeded_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn invalid_opcode_handler(frame: &ExceptionFrame) {
+extern "C" fn invalid_opcode_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         warn!("Invalid opcode");
 
@@ -1635,7 +1660,7 @@ extern "C" fn invalid_opcode_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn device_not_available_handler(frame: &ExceptionFrame) {
+extern "C" fn device_not_available_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         warn!("Device not available");
 
@@ -1647,7 +1672,10 @@ extern "C" fn device_not_available_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn double_fault_handler(frame: &ErrorCodeExceptionFrame) -> ! {
+extern "C" fn double_fault_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) -> ! {
     use_kernel_page_table(|| {
         error!("Double fault");
 
@@ -1659,7 +1687,7 @@ extern "C" fn double_fault_handler(frame: &ErrorCodeExceptionFrame) -> ! {
     }
 }
 
-extern "C" fn invalid_tss_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn invalid_tss_handler(frame: &ErrorCodeExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         warn!("Invalid TSS");
 
@@ -1671,7 +1699,10 @@ extern "C" fn invalid_tss_handler(frame: &ErrorCodeExceptionFrame) {
     }
 }
 
-extern "C" fn segment_not_present_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn segment_not_present_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("Segment not present");
 
@@ -1683,7 +1714,10 @@ extern "C" fn segment_not_present_handler(frame: &ErrorCodeExceptionFrame) {
     }
 }
 
-extern "C" fn stack_segment_fault_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn stack_segment_fault_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("Stack segment fault");
 
@@ -1695,7 +1729,10 @@ extern "C" fn stack_segment_fault_handler(frame: &ErrorCodeExceptionFrame) {
     }
 }
 
-extern "C" fn general_protection_fault_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn general_protection_fault_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("General protection fault");
 
@@ -1713,7 +1750,7 @@ extern "C" fn general_protection_fault_handler(frame: &ErrorCodeExceptionFrame) 
     }
 }
 
-extern "C" fn page_fault_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn page_fault_handler(frame: &ErrorCodeExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         error!("Page fault");
 
@@ -1733,7 +1770,10 @@ extern "C" fn page_fault_handler(frame: &ErrorCodeExceptionFrame) {
     }
 }
 
-extern "C" fn x87_floating_point_exception_handler(frame: &ExceptionFrame) {
+extern "C" fn x87_floating_point_exception_handler(
+    frame: &ExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("x87 floating point exception");
 
@@ -1745,7 +1785,10 @@ extern "C" fn x87_floating_point_exception_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn alignment_check_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn alignment_check_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("Alignment check");
 
@@ -1757,7 +1800,7 @@ extern "C" fn alignment_check_handler(frame: &ErrorCodeExceptionFrame) {
     }
 }
 
-extern "C" fn machine_check_handler(frame: &ExceptionFrame) -> ! {
+extern "C" fn machine_check_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) -> ! {
     use_kernel_page_table(|| {
         warn!("Machine check");
 
@@ -1769,7 +1812,10 @@ extern "C" fn machine_check_handler(frame: &ExceptionFrame) -> ! {
     }
 }
 
-extern "C" fn simd_floating_point_exception_handler(frame: &ExceptionFrame) {
+extern "C" fn simd_floating_point_exception_handler(
+    frame: &ExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("SIMD floating point exception");
 
@@ -1781,7 +1827,10 @@ extern "C" fn simd_floating_point_exception_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn virtualization_exception_handler(frame: &ExceptionFrame) {
+extern "C" fn virtualization_exception_handler(
+    frame: &ExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("Virtualization exception");
 
@@ -1793,7 +1842,10 @@ extern "C" fn virtualization_exception_handler(frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn control_protection_exception_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn control_protection_exception_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("Control protection exception");
 
@@ -1805,7 +1857,10 @@ extern "C" fn control_protection_exception_handler(frame: &ErrorCodeExceptionFra
     }
 }
 
-extern "C" fn vmm_communication_exception_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn vmm_communication_exception_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("VMM communication exception");
 
@@ -1817,7 +1872,10 @@ extern "C" fn vmm_communication_exception_handler(frame: &ErrorCodeExceptionFram
     }
 }
 
-extern "C" fn security_exception_handler(frame: &ErrorCodeExceptionFrame) {
+extern "C" fn security_exception_handler(
+    frame: &ErrorCodeExceptionFrame,
+    _registers: &VolatileRegisters,
+) {
     use_kernel_page_table(|| {
         warn!("Security exception");
 
@@ -1829,49 +1887,14 @@ extern "C" fn security_exception_handler(frame: &ErrorCodeExceptionFrame) {
     }
 }
 
-extern "C" fn syscall_handler(_frame: &ExceptionFrame) {
-    unsafe {
-        asm!(
-            "
-            push r9
-            push r8
-            push r10
-            push rdx
-            push rsi
-            push rdi
-            push rax
-        "
-        );
-    }
-
-    let mut rax: u64;
-    let mut rdi: u64;
-    let mut rsi: u64;
-    let mut rdx: u64;
-    let mut r10: u64;
-    let mut r8: u64;
-    let mut r9: u64;
-
-    unsafe {
-        asm!(
-            "
-                pop {rax}
-                pop {rdi}
-                pop {rsi}
-                pop {rdx}
-                pop {r10}
-                pop {r8}
-                pop {r9}
-            ", 
-            rax = out(reg) rax,
-            rdi = out(reg) rdi,
-            rsi = out(reg) rsi,
-            rdx = out(reg) rdx,
-            r10 = out(reg) r10,
-            r8 = out(reg) r8,
-            r9 = out(reg) r9,
-        );
-    }
+extern "C" fn syscall_handler(_frame: &ExceptionFrame, registers: &VolatileRegisters) {
+    let rax = registers.rax as u64;
+    let rdi = registers.rdi as u64;
+    let rsi = registers.rsi as u64;
+    let rdx = registers.rdx as u64;
+    let _r10 = registers.r10 as u64;
+    let _r8 = registers.r8 as u64;
+    let _r9 = registers.r9 as u64;
 
     let id = rax;
 
@@ -1905,7 +1928,7 @@ extern "C" fn syscall_handler(_frame: &ExceptionFrame) {
     }
 }
 
-extern "C" fn unknown_interrupt_handler(frame: &ExceptionFrame) {
+extern "C" fn unknown_interrupt_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
     use_kernel_page_table(|| {
         info!("Unknown interrupt");
 

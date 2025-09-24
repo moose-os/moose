@@ -66,7 +66,10 @@ impl ProgrammableIntervalTimer {
         outb(CHANNEL0_DATA_PORT, (divisor >> 8) as u8);
 
         // Set timer interrupt handler
-        register_interrupt_handler(PIT_TIMER, Box::new(|isf| pit_interrupt_handler(isf)));
+        register_interrupt_handler(
+            PIT_TIMER,
+            Box::new(|isf, _registers| pit_interrupt_handler(isf)),
+        );
 
         x86_64::instructions::interrupts::enable();
 
