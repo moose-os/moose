@@ -1,6 +1,7 @@
 use bitflags::bitflags;
 use core::fmt::Debug;
 use core::ops::{Index, IndexMut};
+use core::ptr;
 use limine::memory_map::EntryType;
 use limine::response::MemoryMapResponse;
 use log::LevelFilter;
@@ -402,17 +403,37 @@ impl MemoryManager {
         &self,
         address: VirtualAddress,
     ) -> Option<PhysicalAddress> {
-        if address.as_u64() > (1 << 48) {
-            return None;
-        }
-
+        // Virtual address layout:
+        //
+        // 4 KiB page:
+        //
         // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30 | ... | 22 | 21 | ... | 12 | 11 | ... | 0 |
         // | Unused        | Page level 4  | Page level 3  | Page level 2  | Page level 1  | 4 KiB offset |
-        let offset = address.as_u64() & 0b1111_1111_1111;
-        let level_1_page_table_entry_index = ((address.as_u64() >> 12) & 0b1_1111_1111) as usize;
-        let level_2_page_table_entry_index = ((address.as_u64() >> 21) & 0b1_1111_1111) as usize;
-        let level_3_page_table_entry_index = ((address.as_u64() >> 30) & 0b1_1111_1111) as usize;
+        //                   ^ Sign bit
+        //   ^------------ Sign extension
+        //
+        // 2 MiB (huge) page:
+        //
+        // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30 | ... | 22 | 21         | ... |         0 |
+        // | Unused        | Page level 4  | Page level 3  | Page level 2  | 2 MiB offset                 |
+        //                   ^ Sign bit
+        //   ^------------ Sign extension
+        //
+        // 1 GiB (huge) page:
+        //
+        // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30                | ... |                  0 |
+        // | Unused        | Page level 4  | Page level 3  | 1 GiB offset                                 |
+        //                   ^ Sign bit
+        //   ^------------ Sign extension
+        let unused = address.as_u64() >> 48;
+        let sign = (address.as_u64() >> 47) & 0x1;
         let level_4_page_table_entry_index = ((address.as_u64() >> 39) & 0b1_1111_1111) as usize;
+        let level_3_page_table_entry_index = ((address.as_u64() >> 30) & 0b1_1111_1111) as usize;
+
+        // Non canonical address
+        if (sign == 0 && unused != 0) || (sign == 1 && unused != 0xFFFF) {
+            return None;
+        }
 
         let level_4_page_table = unsafe { current_page_table(self.physical_memory_offset) };
         let level_4_page_table_entry =
@@ -447,7 +468,19 @@ impl MemoryManager {
             return None;
         }
 
+        if level_3_page_table_entry
+            .flags()
+            .contains(PageTableFlags::HUGE_PAGE)
+        {
+            let offset = address.as_u64() & 0b11_1111_1111_1111_1111_1111_1111_1111; // 12 + 9 + 9 = 30 bits (1 GiB)
+
+            return Some(PhysicalAddress(
+                level_3_page_table_entry.address().as_u64() + offset,
+            ));
+        }
+
         // Same as `level_3_page_table`
+        let level_2_page_table_entry_index = ((address.as_u64() >> 21) & 0b1_1111_1111) as usize;
         let level_2_page_table: *mut PageTable = VirtualAddress(
             level_3_page_table_entry.address().as_u64() + self.physical_memory_offset,
         )
@@ -462,7 +495,19 @@ impl MemoryManager {
             return None;
         }
 
+        if level_2_page_table_entry
+            .flags()
+            .contains(PageTableFlags::HUGE_PAGE)
+        {
+            let offset = address.as_u64() & 0b1_1111_1111_1111_1111_1111; // 12 + 9 = 21 bits (2 MiB)
+
+            return Some(PhysicalAddress(
+                level_2_page_table_entry.address().as_u64() + offset,
+            ));
+        }
+
         // Same as `level_3_page_table`
+        let level_1_page_table_entry_index = ((address.as_u64() >> 12) & 0b1_1111_1111) as usize;
         let level_1_page_table: *mut PageTable = VirtualAddress(
             level_2_page_table_entry.address().as_u64() + self.physical_memory_offset,
         )
@@ -476,6 +521,8 @@ impl MemoryManager {
         {
             return None;
         }
+
+        let offset = address.as_u64() & 0b1111_1111_1111; // 12 bits (4 KiB)
 
         Some(PhysicalAddress(
             level_1_page_table_entry.address().as_u64() + offset,
@@ -760,17 +807,35 @@ impl MemoryManager {
 
         let address = page.address();
 
-        assert!(address.as_u64() < (1 << 48));
-
+        // Virtual address layout:
+        //
+        // 4 KiB page:
+        //
         // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30 | ... | 22 | 21 | ... | 12 | 11 | ... | 0 |
         // | Unused        | Page level 4  | Page level 3  | Page level 2  | Page level 1  | 4 KiB offset |
-        let offset = address.as_u64() & 0b1111_1111_1111;
-        let level_1_page_table_entry_index = ((address.as_u64() >> 12) & 0b1_1111_1111) as usize;
-        let level_2_page_table_entry_index = ((address.as_u64() >> 21) & 0b1_1111_1111) as usize;
+        //                   ^ Sign bit
+        //   ^------------ Sign extension
+        //
+        // 2 MiB (huge) page:
+        //
+        // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30 | ... | 22 | 21         | ... |         0 |
+        // | Unused        | Page level 4  | Page level 3  | Page level 2  | 2 MiB offset                 |
+        //                   ^ Sign bit
+        //   ^------------ Sign extension
+        //
+        // 1 GiB (huge) page:
+        //
+        // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30                | ... |                  0 |
+        // | Unused        | Page level 4  | Page level 3  | 1 GiB offset                                 |
+        //                   ^ Sign bit
+        //   ^------------ Sign extension
+        let unused = address.as_u64() >> 48;
+        let sign = (address.as_u64() >> 47) & 0x1;
         let level_3_page_table_entry_index = ((address.as_u64() >> 30) & 0b1_1111_1111) as usize;
         let level_4_page_table_entry_index = ((address.as_u64() >> 39) & 0b1_1111_1111) as usize;
 
-        assert_eq!(offset, 0);
+        // Canonical address
+        assert!((sign == 0 && unused == 0) || (sign == 1 && unused == 0xFFFF));
 
         let level_4_page_table_entry =
             &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
@@ -804,11 +869,41 @@ impl MemoryManager {
             return Err(MemoryError::NonExistentMapping);
         }
 
+        if level_3_page_table_entry
+            .flags()
+            .contains(PageTableFlags::HUGE_PAGE)
+        {
+            let offset = address.as_u64() & 0b11_1111_1111_1111_1111_1111_1111_1111; // 12 + 9 + 9 = 30 bits (1 GiB)
+
+            assert_eq!(offset, 0);
+
+            level_3_page_table_entry.set_address(PhysicalAddress::new(0));
+            level_3_page_table_entry.set_flags(PageTableFlags::empty());
+
+            if ptr::eq(level_4_page_table, unsafe {
+                current_page_table(self.physical_memory_offset)
+            }) {
+                // The TLB (translation lookaside buffer) holds results of previous translations and
+                // allows the CPU to skip a lot of additional work in case it was already computed before and
+                // is present in the cache.
+                // Hence, after each page table modification, we need to flush all relevant TLB entries.
+                // If we didn't, there would be **horrible**, hard to track bugs.
+                //
+                // TODO: TLB misses are really inefficient, thus flushing the entire TLB is non optimal.
+                //       Optimizing this at the moment doesn't make much sense,
+                //       but it needs to be done in the future.
+                tlb::flush_all();
+            }
+
+            return Ok(());
+        }
+
         // Same as `level_3_page_table`
         let level_2_page_table: *mut PageTable = VirtualAddress(
             level_3_page_table_entry.address().as_u64() + self.physical_memory_offset,
         )
         .as_mut_ptr();
+        let level_2_page_table_entry_index = ((address.as_u64() >> 21) & 0b1_1111_1111) as usize;
         let level_2_page_table_entry =
             &mut unsafe { &mut *level_2_page_table }[level_2_page_table_entry_index];
 
@@ -819,11 +914,37 @@ impl MemoryManager {
             return Err(MemoryError::NonExistentMapping);
         }
 
+        if level_2_page_table_entry
+            .flags()
+            .contains(PageTableFlags::HUGE_PAGE)
+        {
+            let offset = address.as_u64() & 0b1_1111_1111_1111_1111_1111; // 12 + 9 = 21 bits (2 MiB)
+
+            assert_eq!(offset, 0);
+
+            level_2_page_table_entry.set_address(PhysicalAddress::new(0));
+            level_2_page_table_entry.set_flags(PageTableFlags::empty());
+
+            if ptr::eq(level_4_page_table, unsafe {
+                current_page_table(self.physical_memory_offset)
+            }) {
+                // Same as above
+                tlb::flush_all();
+            }
+
+            return Ok(());
+        }
+
+        let offset = address.as_u64() & 0b1111_1111_1111; // 12 bits (4 KiB)
+
+        assert_eq!(offset, 0);
+
         // Same as `level_3_page_table`
         let level_1_page_table: *mut PageTable = VirtualAddress(
             level_2_page_table_entry.address().as_u64() + self.physical_memory_offset,
         )
         .as_mut_ptr();
+        let level_1_page_table_entry_index = ((address.as_u64() >> 12) & 0b1_1111_1111) as usize;
         let level_1_page_table_entry =
             &mut unsafe { &mut *level_1_page_table }[level_1_page_table_entry_index];
 
@@ -837,16 +958,10 @@ impl MemoryManager {
         level_1_page_table_entry.set_address(PhysicalAddress::new(0));
         level_1_page_table_entry.set_flags(PageTableFlags::empty());
 
-        if level_4_page_table == unsafe { current_page_table(self.physical_memory_offset) } {
-            // The TLB (translation lookaside buffer) holds results of previous translations and
-            // allows the CPU to skip a lot of additional work in case it was already computed before and
-            // is present in the cache.
-            // Hence, after each page table modification, we need to flush all relevant TLB entries.
-            // If we didn't, there would be **horrible**, hard to track bugs.
-            //
-            // TODO: TLB misses are really inefficient, thus flushing the entire TLB is non optimal.
-            //       Optimizing this at the moment doesn't make much sense,
-            //       but it needs to be done in the future.
+        if ptr::eq(level_4_page_table, unsafe {
+            current_page_table(self.physical_memory_offset)
+        }) {
+            // Same as above
             tlb::flush_all();
         }
 

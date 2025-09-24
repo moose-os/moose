@@ -1,5 +1,4 @@
 #![allow(dead_code)]
-#![feature(abi_x86_interrupt)]
 #![feature(allocator_api)]
 #![feature(naked_functions)]
 #![feature(string_remove_matches)]
@@ -172,6 +171,8 @@ unsafe extern "C" fn _start() -> ! {
     init_logger(serial.clone(), terminal.clone()).unwrap();
 
     info!("Hello, moose!");
+
+    assert_eq!(size_of::<arch::x86::idt::Idt>(), 256 * 16);
 
     let interrupt_stack =
         alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack;

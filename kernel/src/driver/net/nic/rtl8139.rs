@@ -3,14 +3,14 @@ use core::slice;
 use log::debug;
 use raw_cpuid::{CpuId, Hypervisor};
 use spin::{Mutex, RwLock};
-use x86_64::{instructions::interrupts::without_interrupts, structures::idt::InterruptStackFrame};
+use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
     arch::{
         irq::IrqLevel,
         x86::{
             asm::{inb, inw, outb, outl, outw},
-            idt::register_interrupt_handler,
+            idt::{register_interrupt_handler, ExceptionFrame, VolatileRegisters},
         },
     },
     cpu::ProcessorControlBlock,
@@ -137,9 +137,11 @@ impl Rtl8139 {
 
                 register_interrupt_handler(
                     irq,
-                    Box::new(move |_isf: &InterruptStackFrame| {
-                        handle_rtl8139_interrupt(&mut inner.lock());
-                    }),
+                    Box::new(
+                        move |_isf: &ExceptionFrame, _registers: &VolatileRegisters| {
+                            handle_rtl8139_interrupt(&mut inner.lock());
+                        },
+                    ),
                 );
 
                 let redirection_entry = RedirectionEntry::new()
