@@ -3,6 +3,9 @@ use core::ptr;
 use crate::font::DEFAULT_ASCII_FONT;
 use limine::framebuffer::Framebuffer;
 
+const BITS_PER_PIXEL: u64 = 32;
+const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;
+
 pub struct Vga {
     framebuffer: Framebuffer<'static>,
 }
@@ -25,9 +28,6 @@ impl Vga {
         assert!(x < self.framebuffer.width());
         assert!(y < self.framebuffer.height());
 
-        const BITS_PER_PIXEL: u64 = 32;
-        const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;
-
         let pixel_offset = ((y * self.framebuffer.pitch()) + (x * BYTES_PER_PIXEL)) as isize;
         let current_pixel = unsafe { self.framebuffer.addr().offset(pixel_offset) } as *mut u32;
 
@@ -40,9 +40,6 @@ impl Vga {
 
         assert!(x < width);
         assert!(y < height);
-
-        const BITS_PER_PIXEL: u64 = 32;
-        const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;
 
         let mut i = 0;
 
@@ -77,9 +74,6 @@ impl Vga {
         assert!(y < framebuffer_height);
         assert!((x + width) <= framebuffer_width);
         assert!((y + height) <= framebuffer_height);
-
-        const BITS_PER_PIXEL: u64 = 32;
-        const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;
 
         let address = self.framebuffer.addr();
         let pitch = self.framebuffer.pitch();
