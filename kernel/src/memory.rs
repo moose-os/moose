@@ -197,10 +197,22 @@ impl MemoryManager {
                 let level_3_page_table_entry =
                     &mut unsafe { &mut *level_3_page_table }[level_3_page_table_entry_index];
 
-                if !level_3_page_table_entry
+                if level_3_page_table_entry
                     .flags()
                     .contains(PageTableFlags::PRESENT)
                 {
+                    if level_3_page_table_entry
+                        .flags()
+                        .contains(PageTableFlags::HUGE_PAGE)
+                    {
+                        if current_sequence_length > 0 {
+                            current_sequence_length = 0;
+                            current_sequence_start = None;
+                        }
+
+                        continue;
+                    }
+                } else {
                     self.allocate_lower_level_page_table(level_3_page_table_entry)
                         .expect("Failed to allocate L2 page table");
                 }
@@ -215,10 +227,22 @@ impl MemoryManager {
                     let level_2_page_table_entry =
                         &mut unsafe { &mut *level_2_page_table }[level_2_page_table_entry_index];
 
-                    if !level_2_page_table_entry
+                    if level_2_page_table_entry
                         .flags()
                         .contains(PageTableFlags::PRESENT)
                     {
+                        if level_2_page_table_entry
+                            .flags()
+                            .contains(PageTableFlags::HUGE_PAGE)
+                        {
+                            if current_sequence_length > 0 {
+                                current_sequence_length = 0;
+                                current_sequence_start = None;
+                            }
+
+                            continue;
+                        }
+                    } else {
                         self.allocate_lower_level_page_table(level_2_page_table_entry)
                             .expect("Failed to allocate L1 page table");
                     }
