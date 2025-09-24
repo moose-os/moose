@@ -1551,6 +1551,11 @@ pub struct ErrorCodeExceptionFrame {
     ss: usize,
 }
 
+/// Volatile (caller-saved) registers in the 64-bit SysV calling convention.
+///
+/// Used in interrupt handlers to access saved register values.
+///
+/// Layout and field order must not be changed.
 #[repr(C, packed)]
 pub struct VolatileRegisters {
     r11: usize,
