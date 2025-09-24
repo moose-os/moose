@@ -4,6 +4,7 @@ use core::ops::{Index, IndexMut};
 use core::ptr;
 use limine::memory_map::EntryType;
 use limine::response::MemoryMapResponse;
+use log::LevelFilter;
 use snafu::Snafu;
 use spin::once::Once;
 use spin::RwLock;
@@ -52,7 +53,7 @@ impl MemoryManager {
         let first_frame = self.allocate_frame();
 
         for _ in 1..n {
-            self.allocate_frame();
+            self.allocate_frame()?;
         }
 
         first_frame
@@ -144,6 +145,250 @@ impl MemoryManager {
         f(page);
 
         self.unmap_for_current_address_space(&page)
+    }
+
+    pub unsafe fn map_any_contiguous_for_current_address_space(
+        &mut self,
+        frame_range: FrameRange,
+        page_flags: PageFlags,
+    ) -> PageRange {
+        self.map_any_contiguous(
+            current_page_table(self.physical_memory_offset),
+            frame_range,
+            page_flags,
+        )
+    }
+
+    pub unsafe fn map_any_contiguous(
+        &mut self,
+        level_4_page_table: *mut PageTable,
+        frame_range: FrameRange,
+        page_flags: PageFlags,
+    ) -> PageRange {
+        let mut current_sequence_start = None;
+        let mut current_sequence_length = 0;
+
+        'outer: for level_4_page_table_entry_index in 0..512 {
+            let level_4_page_table_entry =
+                &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
+
+            if !level_4_page_table_entry
+                .flags()
+                .contains(PageTableFlags::PRESENT)
+            {
+                self.allocate_lower_level_page_table(level_4_page_table_entry)
+                    .expect("Failed to allocate L3 page table");
+            }
+
+            // Addresses in page table entries are all physical,
+            // otherwise they'd need to get translated as well and that would not only be terribly slow
+            // but could also lead to infinite recursion of translations.
+            // As we can't access physical memory directly when we are in long mode,
+            // we need to translate them manually to virtual addresses.
+            // We can do that easily because of the way limine mapped them for us - using higher half direct mapping.
+            // Which means we only need to add/subtract the offset we got from limine to convert addresses
+            // from physical to virtual and vice versa.
+            let level_3_page_table: *mut PageTable = VirtualAddress(
+                level_4_page_table_entry.address().as_u64() + self.physical_memory_offset,
+            )
+            .as_mut_ptr();
+
+            for level_3_page_table_entry_index in 0..512 {
+                let level_3_page_table_entry =
+                    &mut unsafe { &mut *level_3_page_table }[level_3_page_table_entry_index];
+
+                if !level_3_page_table_entry
+                    .flags()
+                    .contains(PageTableFlags::PRESENT)
+                {
+                    self.allocate_lower_level_page_table(level_3_page_table_entry)
+                        .expect("Failed to allocate L2 page table");
+                }
+
+                // Same as `level_3_page_table`
+                let level_2_page_table: *mut PageTable = VirtualAddress(
+                    level_3_page_table_entry.address().as_u64() + self.physical_memory_offset,
+                )
+                .as_mut_ptr();
+
+                for level_2_page_table_entry_index in 0..512 {
+                    let level_2_page_table_entry =
+                        &mut unsafe { &mut *level_2_page_table }[level_2_page_table_entry_index];
+
+                    if !level_2_page_table_entry
+                        .flags()
+                        .contains(PageTableFlags::PRESENT)
+                    {
+                        self.allocate_lower_level_page_table(level_2_page_table_entry)
+                            .expect("Failed to allocate L1 page table");
+                    }
+
+                    // Same as `level_3_page_table`
+                    let level_1_page_table: *mut PageTable = VirtualAddress(
+                        level_2_page_table_entry.address().as_u64() + self.physical_memory_offset,
+                    )
+                    .as_mut_ptr();
+
+                    for level_1_page_table_entry_index in 0..512 {
+                        // Ignore the very first page, as it'd have virtual address 0x0, which is undesirable for a lot of different reasons.
+                        // Firstly, some optimizations assume 0x0 is not a valid address (e.g. Option<&T> being represented as just &T with None being a null pointer).
+                        // Secondly, a lot of methods freak out when they get a 0x0 pointer, thinking it's a null pointer.
+                        if level_4_page_table_entry_index == 0
+                            && level_3_page_table_entry_index == 0
+                            && level_2_page_table_entry_index == 0
+                            && level_1_page_table_entry_index == 0
+                        {
+                            continue;
+                        }
+
+                        if current_sequence_length >= frame_range.n() {
+                            // We already have a sequence of frames long enough, so we can stop searching.
+                            break 'outer;
+                        }
+
+                        let level_1_page_table_entry = &mut unsafe { &mut *level_1_page_table }
+                            [level_1_page_table_entry_index];
+
+                        if level_1_page_table_entry
+                            .flags()
+                            .contains(PageTableFlags::PRESENT)
+                        {
+                            if current_sequence_length > 0 {
+                                current_sequence_length = 0;
+                                current_sequence_start = None;
+                            }
+
+                            continue;
+                        }
+
+                        if current_sequence_length == 0 {
+                            current_sequence_start = Some((
+                                level_4_page_table_entry_index,
+                                level_3_page_table_entry_index,
+                                level_2_page_table_entry_index,
+                                level_1_page_table_entry_index,
+                            ));
+                        }
+
+                        current_sequence_length += 1;
+                    }
+                }
+            }
+        }
+
+        let mut steps = frame_range.n();
+
+        let (
+            mut level_4_page_table_entry_index,
+            mut level_3_page_table_entry_index,
+            mut level_2_page_table_entry_index,
+            mut level_1_page_table_entry_index,
+        ) = current_sequence_start.unwrap();
+
+        let mut frame_iterator = frame_range.iter();
+
+        let mut start_address = VirtualAddress::new(0);
+        let mut end_address = VirtualAddress::new(0);
+
+        while steps > 0 {
+            let frame = frame_iterator
+                .next()
+                .expect("Frame iterator unexpectedly ran out of frames");
+
+            let level_4_page_table_entry =
+                &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
+            let level_3_page_table: *mut PageTable = VirtualAddress(
+                level_4_page_table_entry.address().as_u64() + self.physical_memory_offset,
+            )
+            .as_mut_ptr();
+            let level_3_page_table_entry =
+                &mut unsafe { &mut *level_3_page_table }[level_3_page_table_entry_index];
+            let level_2_page_table: *mut PageTable = VirtualAddress(
+                level_3_page_table_entry.address().as_u64() + self.physical_memory_offset,
+            )
+            .as_mut_ptr();
+            let level_2_page_table_entry =
+                &mut unsafe { &mut *level_2_page_table }[level_2_page_table_entry_index];
+            let level_1_page_table: *mut PageTable = VirtualAddress(
+                level_2_page_table_entry.address().as_u64() + self.physical_memory_offset,
+            )
+            .as_mut_ptr();
+            let level_1_page_table_entry =
+                &mut unsafe { &mut *level_1_page_table }[level_1_page_table_entry_index];
+
+            level_1_page_table_entry.set_address(frame.address());
+            level_1_page_table_entry.set_flags(PageTableFlags::PRESENT);
+
+            self.assign_propagable_page_flags_to_page_table_entry(
+                level_4_page_table_entry,
+                page_flags,
+            );
+            self.assign_propagable_page_flags_to_page_table_entry(
+                level_3_page_table_entry,
+                page_flags,
+            );
+            self.assign_propagable_page_flags_to_page_table_entry(
+                level_2_page_table_entry,
+                page_flags,
+            );
+            self.assign_propagable_page_flags_to_page_table_entry(
+                level_1_page_table_entry,
+                page_flags,
+            );
+
+            if !page_flags.contains(PageFlags::EXECUTABLE) {
+                level_1_page_table_entry
+                    .set_flags(level_1_page_table_entry.flags() | PageTableFlags::NO_EXECUTE);
+            }
+
+            if page_flags.contains(PageFlags::WRITE_THROUGH) {
+                level_1_page_table_entry
+                    .set_flags(level_1_page_table_entry.flags() | PageTableFlags::WRITE_THROUGH);
+            }
+
+            if page_flags.contains(PageFlags::DISABLE_CACHING) {
+                level_1_page_table_entry
+                    .set_flags(level_1_page_table_entry.flags() | PageTableFlags::NO_CACHE);
+            }
+
+            let address = ((level_4_page_table_entry_index as u64) << 39)
+                | ((level_3_page_table_entry_index as u64) << 30)
+                | ((level_2_page_table_entry_index as u64) << 21)
+                | ((level_1_page_table_entry_index as u64) << 12);
+
+            if steps == frame_range.n() {
+                start_address = VirtualAddress::new(address);
+            }
+
+            if steps == 1 {
+                end_address = VirtualAddress::new(address);
+            }
+
+            level_1_page_table_entry_index += 1;
+
+            if level_1_page_table_entry_index >= 512 {
+                level_1_page_table_entry_index = 0;
+                level_2_page_table_entry_index += 1;
+
+                if level_2_page_table_entry_index >= 512 {
+                    level_2_page_table_entry_index = 0;
+                    level_3_page_table_entry_index += 1;
+
+                    if level_3_page_table_entry_index >= 512 {
+                        level_3_page_table_entry_index = 0;
+                        level_4_page_table_entry_index += 1;
+
+                        if level_4_page_table_entry_index >= 512 {
+                            panic!("The entire page table is occupied");
+                        }
+                    }
+                }
+            }
+
+            steps -= 1;
+        }
+
+        PageRange::new(start_address, end_address)
     }
 
     pub unsafe fn unmap_for_current_address_space(&self, page: &Page) -> Result<(), MemoryError> {
@@ -906,6 +1151,79 @@ bitflags! {
 }
 
 #[derive(Clone, Copy)]
+pub struct PageRange {
+    start: VirtualAddress,
+    end: VirtualAddress,
+}
+
+impl PageRange {
+    pub fn new(start: VirtualAddress, end: VirtualAddress) -> Self {
+        assert!(start.is_aligned_to(PAGE_SIZE as u64));
+        assert!(end.is_aligned_to(PAGE_SIZE as u64));
+        assert!(start.as_u64() < end.as_u64());
+
+        Self { start, end }
+    }
+
+    pub fn contains(&self, page: &Page) -> bool {
+        self.start.as_u64() <= page.address().as_u64()
+            && page.address().as_u64() < self.end.as_u64()
+    }
+
+    pub fn start(&self) -> VirtualAddress {
+        self.start
+    }
+
+    pub fn end(&self) -> VirtualAddress {
+        self.end
+    }
+
+    pub fn n(&self) -> usize {
+        ((self.end.as_u64() - self.start.as_u64()) / PAGE_SIZE as u64) as usize
+    }
+}
+
+pub struct PageRangeIterator {
+    page_range: PageRange,
+    current: VirtualAddress,
+}
+
+impl PageRangeIterator {
+    pub fn new(page_range: PageRange) -> Self {
+        assert!(page_range.start.is_aligned_to(PAGE_SIZE as u64));
+        assert!(page_range.end.is_aligned_to(PAGE_SIZE as u64));
+
+        Self {
+            page_range,
+            current: page_range.start,
+        }
+    }
+}
+
+impl Iterator for PageRangeIterator {
+    type Item = Page;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current < self.page_range.end {
+            let page = Page::new(self.current);
+
+            self.current.0 += PAGE_SIZE as u64;
+
+            Some(page)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let size =
+            (self.page_range.end.as_u64() - self.page_range.start.as_u64()) / PAGE_SIZE as u64;
+
+        (size as usize, Some(size as usize))
+    }
+}
+
+#[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct Page {
     address: VirtualAddress,
@@ -921,6 +1239,83 @@ impl Page {
     #[inline]
     pub fn address(&self) -> VirtualAddress {
         self.address
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct FrameRange {
+    start: PhysicalAddress,
+    end: PhysicalAddress,
+}
+
+impl FrameRange {
+    pub fn new(start: PhysicalAddress, end: PhysicalAddress) -> Self {
+        assert!(start.is_aligned_to(FRAME_SIZE as u64));
+        assert!(end.is_aligned_to(FRAME_SIZE as u64));
+        assert!(start.as_u64() < end.as_u64());
+
+        Self { start, end }
+    }
+
+    pub fn contains(&self, frame: &Frame) -> bool {
+        self.start.as_u64() <= frame.address().as_u64()
+            && frame.address().as_u64() < self.end.as_u64()
+    }
+
+    pub fn start(&self) -> PhysicalAddress {
+        self.start
+    }
+
+    pub fn end(&self) -> PhysicalAddress {
+        self.end
+    }
+
+    pub fn n(&self) -> usize {
+        ((self.end.as_u64() - self.start.as_u64()) / FRAME_SIZE as u64) as usize
+    }
+
+    pub fn iter(&self) -> FrameRangeIterator {
+        FrameRangeIterator::new(*self)
+    }
+}
+
+pub struct FrameRangeIterator {
+    frame_range: FrameRange,
+    current: PhysicalAddress,
+}
+
+impl FrameRangeIterator {
+    pub fn new(frame_range: FrameRange) -> Self {
+        assert!(frame_range.start.is_aligned_to(FRAME_SIZE as u64));
+        assert!(frame_range.end.is_aligned_to(FRAME_SIZE as u64));
+
+        Self {
+            frame_range,
+            current: frame_range.start,
+        }
+    }
+}
+
+impl Iterator for FrameRangeIterator {
+    type Item = Frame;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current < self.frame_range.end {
+            let frame = Frame::new(self.current);
+
+            self.current.0 += FRAME_SIZE as u64;
+
+            Some(frame)
+        } else {
+            None
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let size =
+            (self.frame_range.end.as_u64() - self.frame_range.start.as_u64()) / FRAME_SIZE as u64;
+
+        (size as usize, Some(size as usize))
     }
 }
 
@@ -943,7 +1338,7 @@ impl Frame {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct VirtualAddress(u64);
 
@@ -972,7 +1367,7 @@ impl VirtualAddress {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct PhysicalAddress(u64);
 
