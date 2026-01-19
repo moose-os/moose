@@ -224,6 +224,15 @@ impl LocalApic {
 
         unsafe { ptr::write_volatile(ptr, value) }
     }
+
+    pub fn is_isr(&self, vector: u8) -> bool {
+        let reg_offset = (vector / 32) as u32 * 0x10;
+        let bit = vector % 32;
+
+        let isr_val = self.read_register(0x100 + reg_offset);
+
+        (isr_val & (1 << bit)) != 0
+    }
 }
 
 #[unsafe(naked)]
@@ -231,7 +240,7 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
     naked_asm!(
         "
                 sub rsp, {size}
-                
+
                 mov [rsp + {rax_offset}], rax
                 mov [rsp + {rbx_offset}], rbx
                 mov [rsp + {rcx_offset}], rcx
@@ -239,10 +248,10 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
                 mov [rsp + {rsi_offset}], rsi
                 mov [rsp + {rdi_offset}], rdi
                 mov [rsp + {rbp_offset}], rbp
-                
+
                 mov rax, [rsp + {interrupt_stack_frame_rsp_offset}]
                 mov [rsp + {rsp_offset}], rax
-                
+
                 mov [rsp + {r8_offset}], r8
                 mov [rsp + {r9_offset}], r9
                 mov [rsp + {r10_offset}], r10
@@ -251,10 +260,10 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
                 mov [rsp + {r13_offset}], r13
                 mov [rsp + {r14_offset}], r14
                 mov [rsp + {r15_offset}], r15
-                
+
                 mov rax, [rsp + {interrupt_stack_frame_rip_offset}]
                 mov [rsp + {rip_offset}], rax
-                
+
                 mov rax, [rsp + {interrupt_stack_frame_rflags_offset}]
                 mov [rsp + {rflags_offset}], rax
 
@@ -334,17 +343,30 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 
 #[no_mangle]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
-    let kernel = kernel_ref();
-
-    kernel.ticks.fetch_add(1, Ordering::SeqCst);
-
     scheduler::run(registers);
 
     use_kernel_page_table(|| unsafe {
-        (*ProcessorControlBlock::get_pcb_for_current_processor())
+        let kernel = kernel_ref();
+
+        // Check if the timer bit is set in LAPIC's In-Service Register (ISR).
+        // True IRQs set this bit; manual calls (yield) do not.
+        let is_hw_interrupt = (*ProcessorControlBlock::get_pcb_for_current_processor())
             .local_apic
             .get()
             .unwrap()
-            .signal_end_of_interrupt();
+            .is_isr(kernel.timer_irq);
+
+        if is_hw_interrupt {
+            // Only increment system time on actual hardware clock ticks.
+            kernel.ticks.fetch_add(1, Ordering::SeqCst);
+
+            // EOI is mandatory for hardware IRQs to allow further interrupts,
+            // but must be avoided for software-triggered calls.
+            (*ProcessorControlBlock::get_pcb_for_current_processor())
+                .local_apic
+                .get()
+                .unwrap()
+                .signal_end_of_interrupt();
+        }
     });
 }

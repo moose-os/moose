@@ -94,6 +94,7 @@ impl Kernel {
         &self,
         program: &[u8],
         interrupt_stack: *mut InterruptStack,
+        base_priority: usize,
     ) -> Result<Process, ()> {
         let stack =
             unsafe { alloc::alloc::alloc_zeroed(Layout::new::<ThreadStack>()) } as *mut ThreadStack;
@@ -171,6 +172,7 @@ impl Kernel {
             stack,
             is_kernel_mode: false,
             reschedule: AtomicBool::new(true),
+            priority: base_priority,
         }));
 
         process.0.threads.lock().push(thread.clone());
@@ -182,7 +184,11 @@ impl Kernel {
         Ok(process)
     }
 
-    pub fn spawn_kernel_thread(&self, entry_point: extern "C" fn() -> !) -> Thread {
+    pub fn spawn_kernel_thread(
+        &self,
+        entry_point: extern "C" fn() -> !,
+        priority: usize,
+    ) -> Thread {
         let kernel_process = self.processes.read().first().unwrap().clone();
 
         let thread_id = self.current_usable_thread_id.fetch_add(1, Ordering::SeqCst);
@@ -198,8 +204,8 @@ impl Kernel {
             registers: Mutex::new(Registers {
                 rip: entry_point as usize as u64,
                 rsp: stack as u64 + mem::size_of::<ThreadStack>() as u64 - 16,
-                cs: (5 << 3) | 3,
-                ss: (6 << 3) | 3,
+                cs: (5 << 3),
+                ss: (6 << 3),
                 gs: GS::read_base().as_u64(),
                 rflags: rflags::read_raw(),
                 ..Default::default()
@@ -207,6 +213,7 @@ impl Kernel {
             stack,
             is_kernel_mode: true,
             reschedule: AtomicBool::new(true),
+            priority,
         }));
 
         kernel_process.0.threads.lock().push(thread.clone());

@@ -25,6 +25,7 @@ mod vga;
 use crate::allocator::initialize_heap;
 use crate::driver::{pic::PIC, pit::PIT};
 use crate::memory::initialize_memory_manager;
+use crate::process::DEFAULT_THREAD_PRIORITY;
 use crate::terminal::Terminal;
 use alloc::sync::Arc;
 use arch::x86::gdt::{
@@ -271,8 +272,12 @@ unsafe extern "C" fn _start() -> ! {
     static PROGRAM_1: &[u8] = include_bytes!("../../program1/target/x86_64-moose/release/program1");
     static PROGRAM_2: &[u8] = include_bytes!("../../program2/target/x86_64-moose/release/program2");
 
-    kernel.spawn_process(PROGRAM_1, interrupt_stack).unwrap();
-    kernel.spawn_process(PROGRAM_2, interrupt_stack).unwrap();
+    kernel
+        .spawn_process(PROGRAM_1, interrupt_stack, DEFAULT_THREAD_PRIORITY)
+        .unwrap();
+    kernel
+        .spawn_process(PROGRAM_2, interrupt_stack, DEFAULT_THREAD_PRIORITY)
+        .unwrap();
 
     (*pcb).local_apic.get().unwrap().enable_timer();
 

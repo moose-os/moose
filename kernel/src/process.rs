@@ -1,10 +1,22 @@
-use crate::{memory::PageTable, scheduler};
+use crate::{
+    memory::PageTable,
+    scheduler::{self, PRIORITIES_NUM},
+};
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     ffi::c_void,
     sync::atomic::{AtomicBool, AtomicUsize},
 };
 use spin::{Mutex, MutexGuard};
+
+/// Default priority assigned to new threads (middle of the range).
+pub const DEFAULT_THREAD_PRIORITY: usize = PRIORITIES_NUM / 2;
+
+/// Minimum execution priority (least urgent).
+pub const LOWEST_THREAD_PRIORITY: usize = 0;
+
+/// Maximum execution priority (most urgent).
+pub const HIGHEST_THREAD_PRIORITY: usize = PRIORITIES_NUM - 1;
 
 static CURRENT_USABLE_PROCESS_ID: AtomicUsize = AtomicUsize::new(0);
 static CURRENT_USABLE_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
@@ -46,6 +58,10 @@ impl Thread {
         &self.0.process
     }
 
+    pub fn priority(&self) -> usize {
+        self.0.priority
+    }
+
     pub fn id(&self) -> ThreadId {
         self.0.id
     }
@@ -55,31 +71,27 @@ impl Thread {
     }
 
     pub fn set_status(&self, status: Status) {
-        let mut current_status = self.0.status.lock();
+        let current_status = self.0.status.lock().clone();
+        let new_status = status;
+        *self.0.status.lock() = new_status;
 
-        if *current_status == status {
-            return;
-        }
-
-        match *current_status {
-            Status::Running => match status {
+        match current_status {
+            Status::Running => match new_status {
                 Status::Stopped => scheduler::unschedule(self),
                 Status::Waiting { timeout: _ } => scheduler::unschedule(self),
                 _ => {}
             },
             Status::Stopped => {
-                if status == Status::Running {
+                if new_status == Status::Running {
                     scheduler::schedule(self.clone());
                 }
             }
             Status::Waiting { timeout: _ } => {
-                if status == Status::Running {
+                if new_status == Status::Running {
                     scheduler::schedule(self.clone());
                 }
             }
         }
-
-        *current_status = status;
     }
 
     pub(crate) fn entry(&self) -> *const c_void {
@@ -104,6 +116,7 @@ pub(crate) struct ThreadInner {
     pub(crate) stack: *mut ThreadStack,
     pub(crate) is_kernel_mode: bool,
     pub(crate) reschedule: AtomicBool,
+    pub(crate) priority: usize,
 }
 
 unsafe impl Send for ThreadInner {}
