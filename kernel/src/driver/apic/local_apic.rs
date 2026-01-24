@@ -5,8 +5,8 @@ use crate::cpu::ProcessorControlBlock;
 use crate::driver::pit::PIT;
 use crate::kernel::{kernel_ref, Kernel};
 use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress};
-use crate::process::Registers;
-use crate::scheduler;
+use crate::process::{Registers, Status};
+use crate::scheduler::{self, TIMEOUT_QUEUE};
 use crate::InterruptStack;
 use alloc::sync::Arc;
 use core::alloc::Layout;
@@ -164,6 +164,7 @@ impl LocalApic {
     pub fn enable_timer(&self) {
         // Fire timer every 10ms
         let ticks_per_10ms = self.kernel.apic.read().local_apic_timer_ticks_per_second / 100;
+        self.kernel.apic.write().ms_per_tick = 10;
 
         // Enable interrupts
         self.write_register(LOCAL_APIC_TASK_PRIORITY_REGISTER, 0);
@@ -357,8 +358,27 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
             .is_isr(kernel.timer_irq);
 
         if is_hw_interrupt {
-            // Only increment system time on actual hardware clock ticks.
-            kernel.ticks.fetch_add(1, Ordering::SeqCst);
+            // Increment internal tick counter only on bootstrap processor
+            if (*ProcessorControlBlock::get_pcb_for_current_processor()).is_bsp {
+                // Only increment system time on actual hardware clock ticks.
+                let current_tick_count = kernel.ticks.fetch_add(1, Ordering::SeqCst);
+
+                // Process TIMEOUT_QUEUE to expire timers and wake up waiting threads
+                {
+                    let mut queue = TIMEOUT_QUEUE.get().unwrap().lock();
+
+                    // Since TIMEOUT_QUEUE is sorted by expiration time (ascending),
+                    // we only need to inspect the head of the queue. If the first
+                    // timer hasn't expired, no subsequent timers have either.
+                    // This allows an O(1) check for most ticks and O(k) for k expired threads.
+                    while queue.front().map_or(false, |(expiration_tick_count, _)| {
+                        *expiration_tick_count <= current_tick_count
+                    }) {
+                        let (_, thread) = queue.pop_front().unwrap();
+                        thread.set_status(Status::Running);
+                    }
+                }
+            }
 
             // EOI is mandatory for hardware IRQs to allow further interrupts,
             // but must be avoided for software-triggered calls.

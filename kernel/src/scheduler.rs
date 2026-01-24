@@ -5,7 +5,7 @@ use core::{
 };
 
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use spin::Mutex;
+use spin::{once::Once, Mutex};
 use x86_64::{
     instructions::interrupts,
     registers::control::{Cr3, Cr3Flags},
@@ -16,6 +16,14 @@ use x86_64::{
 use crate::process::{Registers, Status, Thread, ThreadStack};
 
 static SCHEDULER: Scheduler = Scheduler::new();
+
+/// A global queue for threads waiting on a timed sleep or timeout.
+///
+/// ### Data Structure:
+/// Entry in the vector is a tuple of `(usize, Thread)`:
+/// * `usize`: The absolute tick count at which the timeout expires.
+/// * `Thread`: The handle or descriptor of the thread to be woken up.
+pub static TIMEOUT_QUEUE: Once<Mutex<VecDeque<(u64, Thread)>>> = Once::new();
 
 pub const PRIORITIES_NUM: usize = 16;
 
@@ -37,6 +45,10 @@ impl Scheduler {
 
 impl Scheduler {
     pub fn run() -> ! {
+        if !TIMEOUT_QUEUE.is_completed() {
+            TIMEOUT_QUEUE.call_once(|| Mutex::new(VecDeque::new()));
+        }
+
         loop {
             // Find new thread to execute.
             //
@@ -151,7 +163,7 @@ impl Event {
     }
 
     pub fn wait_on(&self, thread: &Thread) {
-        thread.set_status(Status::Waiting { timeout: None });
+        thread.set_status(Status::Waiting);
 
         self.0.waiting_threads.lock().push(thread.clone());
     }
@@ -179,7 +191,7 @@ pub fn schedule(thread: Thread) {
     match thread.status() {
         Status::Running => {}
         Status::Stopped => return,
-        Status::Waiting { timeout: _ } => return,
+        Status::Waiting => return,
     }
 
     thread.0.reschedule.store(true, Ordering::SeqCst);

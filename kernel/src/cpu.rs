@@ -8,6 +8,7 @@ pub(crate) const MAXIMUM_CPU_CORES: usize = 4;
 
 pub struct ProcessorControlBlock {
     pub apic_processor_id: u16,
+    pub is_bsp: bool,
     pub local_apic: OnceCell<LocalApic>,
 }
 
@@ -15,6 +16,7 @@ impl ProcessorControlBlock {
     pub unsafe fn create_pcb_for_current_processor(apic_processor_id: u16) {
         let ptr = Box::leak(Box::new(ProcessorControlBlock {
             apic_processor_id: 0xFFFF,
+            is_bsp: false,
             local_apic: OnceCell::new(),
         }));
 

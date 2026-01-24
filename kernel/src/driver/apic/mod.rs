@@ -23,6 +23,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 
 pub struct Apic {
     pub local_apic_timer_ticks_per_second: u64,
+    pub ms_per_tick: u64,
     pub acpi: Arc<Acpi>,
     io_apics: Vec<Mutex<IoApic>>,
 }
@@ -56,6 +57,7 @@ impl Apic {
 
         Apic {
             local_apic_timer_ticks_per_second: 0,
+            ms_per_tick: 0,
             acpi,
             io_apics,
         }

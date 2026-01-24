@@ -1,6 +1,7 @@
 use crate::{
+    kernel::kernel_ref,
     memory::PageTable,
-    scheduler::{self, PRIORITIES_NUM},
+    scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
 };
 use alloc::{sync::Arc, vec::Vec};
 use core::{
@@ -78,7 +79,7 @@ impl Thread {
         match current_status {
             Status::Running => match new_status {
                 Status::Stopped => scheduler::unschedule(self),
-                Status::Waiting { timeout: _ } => scheduler::unschedule(self),
+                Status::Waiting => scheduler::unschedule(self),
                 _ => {}
             },
             Status::Stopped => {
@@ -86,12 +87,38 @@ impl Thread {
                     scheduler::schedule(self.clone());
                 }
             }
-            Status::Waiting { timeout: _ } => {
+            Status::Waiting => {
                 if new_status == Status::Running {
                     scheduler::schedule(self.clone());
                 }
             }
         }
+    }
+
+    pub fn sleep(&self, time_in_ms: usize) {
+        // Need to convert relative time in miliseconds to absolute kernel tick count
+        let sleep_time_in_ticks = time_in_ms as u64 / kernel_ref().apic.read().ms_per_tick;
+        let expiration_time = kernel_ref()
+            .ticks
+            .load(core::sync::atomic::Ordering::SeqCst)
+            + sleep_time_in_ticks;
+
+        // Insert thread to TIMEOUT_QUEUE and change its status to Status::Waiting
+        if let Some(mutex) = TIMEOUT_QUEUE.get() {
+            let mut queue = mutex.lock();
+
+            // Find the correct position for the new timeout.
+            // If multiple threads have the same expiration, this inserts after them.
+            let position = queue
+                .binary_search_by(|(expiration_tick_count, _)| {
+                    expiration_tick_count.cmp(&expiration_time)
+                })
+                .unwrap_or_else(|e| e);
+
+            queue.insert(position, (expiration_time, self.clone()));
+        }
+
+        self.set_status(Status::Waiting);
     }
 
     pub(crate) fn entry(&self) -> *const c_void {
@@ -126,7 +153,7 @@ unsafe impl Sync for ThreadInner {}
 pub enum Status {
     Running,
     Stopped,
-    Waiting { timeout: Option<u64> },
+    Waiting,
 }
 
 #[repr(C)]

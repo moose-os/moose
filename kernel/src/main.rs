@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 #![feature(allocator_api)]
-#![feature(naked_functions)]
 #![feature(string_remove_matches)]
 #![no_std]
 #![no_main]
@@ -249,6 +248,7 @@ unsafe extern "C" fn _start() -> ! {
 
     let bsp_lapic = LocalApic::initialize_for_current_processor(Arc::clone(&kernel));
     let pcb = cpu::ProcessorControlBlock::get_pcb_for_current_processor();
+    (*pcb).is_bsp = true;
 
     _ = (*pcb).local_apic.set(bsp_lapic);
 
