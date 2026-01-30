@@ -71,23 +71,16 @@ impl Thread {
         *self.0.status.lock()
     }
 
-    pub fn set_status(&self, status: Status) {
+    pub fn set_status(&self, new_status: Status) {
         let current_status = self.0.status.lock().clone();
-        let new_status = status;
         *self.0.status.lock() = new_status;
 
         match current_status {
             Status::Running => match new_status {
-                Status::Stopped => scheduler::unschedule(self),
-                Status::Waiting => scheduler::unschedule(self),
+                Status::Stopped | Status::Waiting => scheduler::unschedule(self),
                 _ => {}
             },
-            Status::Stopped => {
-                if new_status == Status::Running {
-                    scheduler::schedule(self.clone());
-                }
-            }
-            Status::Waiting => {
+            Status::Stopped | Status::Waiting => {
                 if new_status == Status::Running {
                     scheduler::schedule(self.clone());
                 }

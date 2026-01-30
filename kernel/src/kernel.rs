@@ -10,7 +10,10 @@ use crate::linker::Linker;
 use crate::memory::{
     current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress, PAGE_SIZE,
 };
-use crate::process::{Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack};
+use crate::process::{
+    Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
+    HIGHEST_THREAD_PRIORITY,
+};
 use crate::{arch::irq::IrqAllocator, memory::PageTable};
 use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
 use alloc::vec::Vec;
@@ -94,8 +97,12 @@ impl Kernel {
         &self,
         program: &[u8],
         interrupt_stack: *mut InterruptStack,
-        base_priority: usize,
+        priority: usize,
     ) -> Result<Process, ()> {
+        if priority > HIGHEST_THREAD_PRIORITY {
+            return Err(());
+        }
+
         let stack =
             unsafe { alloc::alloc::alloc_zeroed(Layout::new::<ThreadStack>()) } as *mut ThreadStack;
 
@@ -172,7 +179,7 @@ impl Kernel {
             stack,
             is_kernel_mode: false,
             reschedule: AtomicBool::new(true),
-            priority: base_priority,
+            priority,
         }));
 
         process.0.threads.lock().push(thread.clone());
@@ -188,7 +195,11 @@ impl Kernel {
         &self,
         entry_point: extern "C" fn() -> !,
         priority: usize,
-    ) -> Thread {
+    ) -> Result<Thread, ()> {
+        if priority > HIGHEST_THREAD_PRIORITY {
+            return Err(());
+        }
+
         let kernel_process = self.processes.read().first().unwrap().clone();
 
         let thread_id = self.current_usable_thread_id.fetch_add(1, Ordering::SeqCst);
@@ -220,7 +231,7 @@ impl Kernel {
 
         scheduler::schedule(thread.clone());
 
-        thread
+        Ok(thread)
     }
 
     pub fn create_address_space(

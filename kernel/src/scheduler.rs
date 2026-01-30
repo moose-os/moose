@@ -120,13 +120,13 @@ impl Scheduler {
 ///
 /// The constructed stack frame follows the x86_64 ABI requirements for an `IRETQ` instruction:
 ///
-/// | Value  | Description |
-/// | :---   | :--- |
-/// | **SS** | Stack Segment selector |
-/// | **RSP** | Stack Pointer (pointing to the instruction after the call) |
-/// | **RFLAGS** | Processor flags (captured at the moment of call) |
-/// | **CS** | Code Segment selector |
-/// | **RIP** | Instruction Pointer (the return address) |
+/// | Value      | Description                                                |
+/// | :--------- | :--------------------------------------------------------- |
+/// | **SS**     | Stack Segment selector                                     |
+/// | **RSP**    | Stack Pointer (pointing to the instruction after the call) |
+/// | **RFLAGS** | Processor flags (captured at the moment of call)           |
+/// | **CS**     | Code Segment selector                                      |
+/// | **RIP**    | Instruction Pointer (the return address)                   |
 ///
 #[unsafe(naked)]
 pub extern "C" fn yield_to_scheduler() {
