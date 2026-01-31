@@ -5,8 +5,8 @@ use crate::cpu::ProcessorControlBlock;
 use crate::driver::pit::PIT;
 use crate::kernel::{kernel_ref, Kernel};
 use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress};
-use crate::process::Registers;
-use crate::scheduler;
+use crate::process::{Registers, Status};
+use crate::scheduler::{self, TIMEOUT_QUEUE};
 use crate::InterruptStack;
 use alloc::sync::Arc;
 use core::alloc::Layout;
@@ -236,7 +236,7 @@ impl LocalApic {
 }
 
 #[unsafe(naked)]
-pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
+pub(crate) extern "C" fn raw_timer_interrupt_handler() {
     unsafe {
         naked_asm!(
             "
@@ -345,14 +345,14 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 
 #[no_mangle]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
-    let kernel = kernel_ref();
-
-    kernel.ticks.fetch_add(1, Ordering::SeqCst);
-
     scheduler::run(registers);
 
     use_kernel_page_table(|| unsafe {
-        (*ProcessorControlBlock::get_pcb_for_current_processor())
+        let kernel = kernel_ref();
+
+        // Check if the timer bit is set in LAPIC's In-Service Register (ISR).
+        // True IRQs set this bit; manual calls (yield) do not.
+        let is_hw_interrupt = (*ProcessorControlBlock::get_pcb_for_current_processor())
             .local_apic
             .get()
             .unwrap()

@@ -1,6 +1,8 @@
 #![allow(dead_code)]
+#![allow(clippy::fn_to_numeric_cast)]
 #![feature(allocator_api)]
 #![feature(string_remove_matches)]
+#![feature(abi_x86_interrupt)]
 #![no_std]
 #![no_main]
 #![allow(unused)]
@@ -250,16 +252,17 @@ unsafe extern "C" fn _start() -> ! {
 
     // let mgr = DeviceManager::new();
     // mgr.enumerate_devices();
-    (*pcb).local_apic.get().unwrap().enable_timer();
+
+    kernel.spawn_kernel_thread(idle, DEFAULT_THREAD_PRIORITY);
+    kernel.spawn_kernel_thread(idle, DEFAULT_THREAD_PRIORITY);
 
     kernel.hyperv.initialize_hv();
     debug!("initialized");
-    loop {}
 
-    kernel
-        .apic
-        .read()
-        .setup_other_application_processors(Arc::clone(&kernel), (*pcb).local_apic.get().unwrap());
+    // kernel
+    //     .apic
+    //     .read()
+    //     .setup_other_application_processors(Arc::clone(&kernel), (*pcb).local_apic.get().unwrap());
 
     switch_to_post_boot_logger(serial, terminal);
 
@@ -268,16 +271,20 @@ unsafe extern "C" fn _start() -> ! {
     static PROGRAM_1: &[u8] = include_bytes!("../../program1/target/x86_64-moose/release/program1");
     static PROGRAM_2: &[u8] = include_bytes!("../../program2/target/x86_64-moose/release/program2");
 
-    kernel
-        .spawn_process(PROGRAM_1, interrupt_stack, DEFAULT_THREAD_PRIORITY)
-        .unwrap();
-    kernel
-        .spawn_process(PROGRAM_2, interrupt_stack, DEFAULT_THREAD_PRIORITY)
-        .unwrap();
+    // kernel
+    //     .spawn_process(PROGRAM_1, interrupt_stack, DEFAULT_THREAD_PRIORITY)
+    //     .unwrap();
+    // kernel
+    //     .spawn_process(PROGRAM_2, interrupt_stack, DEFAULT_THREAD_PRIORITY)
+    //     .unwrap();
 
     (*pcb).local_apic.get().unwrap().enable_timer();
 
     Scheduler::run();
+}
+
+extern "C" fn idle() -> ! {
+    loop {}
 }
 
 #[repr(C)]

@@ -205,7 +205,7 @@ impl DeviceManager {
 
             register_interrupt_handler(
                 i,
-                Box::new(move |isf| {
+                Box::new(move |isf, regs| {
                     debug!("GOT INTERRUPT");
                     let kernel = kernel_ref();
                     if let Some(devices) = kernel.devices_interrupt_map.lock().get(&i) {

@@ -187,7 +187,7 @@ impl NetworkDriver for Rtl8139Driver {
             outl(io_base + transmit_buffer, tx_buffer_phys_address as u32);
             outl(io_base + transmit_status, packet.len() as u32);
 
-            self.adjust_transmit_registers(state);
+            self.adjust_transmit_registers(&mut state);
         });
 
         Ok(())

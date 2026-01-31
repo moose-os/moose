@@ -247,7 +247,7 @@ use x86_64::{
 };
 
 use crate::{
-    arch::x86::idt::register_interrupt_handler,
+    arch::x86::idt::{register_interrupt_handler, ExceptionFrame, VolatileRegisters},
     cpu::ProcessorControlBlock,
     driver::hv::{
         guid::Guid,
@@ -1187,7 +1187,9 @@ impl HyperV {
         // It will be responisible for handling VMBus initialization, channel opening and other low level stuff.
         register_interrupt_handler(
             HYPERV_VMBUS_IRQ_VECTOR,
-            Box::new(|isf: &InterruptStackFrame| handle_vmbus_irq(isf)),
+            Box::new(|frame: &ExceptionFrame, regs: &VolatileRegisters| {
+                handle_vmbus_irq(frame, regs)
+            }),
         );
 
         // Currently, we still rely on the APIC timer for timekeeping and scheduling.
@@ -1377,7 +1379,9 @@ impl HyperV {
         // Register interrupt handler
         register_interrupt_handler(
             HYPERV_STIMER0_VECTOR,
-            Box::new(|isf: &InterruptStackFrame| handle_stimer0_irq(isf)),
+            Box::new(|frame: &ExceptionFrame, regs: &VolatileRegisters| {
+                handle_stimer0_irq(frame, regs)
+            }),
         );
 
         let mut count = Msr::new(HYPERV_X64_MSR_STIMER0_COUNT);
@@ -1793,7 +1797,7 @@ fn convert_message_to_slice<T>(message: &T) -> [u8; 240] {
 }
 
 /// Handles the VMBus interrupt request.
-fn handle_vmbus_irq(_isf: &InterruptStackFrame) {
+fn handle_vmbus_irq(_frame: &ExceptionFrame, _regs: &VolatileRegisters) {
     kernel_ref().hyperv.handle_simp_irq();
 
     unsafe {
@@ -1806,7 +1810,7 @@ fn handle_vmbus_irq(_isf: &InterruptStackFrame) {
 }
 
 /// Handles the STIMER0 interrupt request.
-fn handle_stimer0_irq(_isf: &InterruptStackFrame) {
+fn handle_stimer0_irq(_frame: &ExceptionFrame, _regs: &VolatileRegisters) {
     kernel_ref().hyperv.handle_stimer0();
 
     unsafe {
