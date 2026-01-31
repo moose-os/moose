@@ -30,7 +30,7 @@
 //! ├─────────────────────────────────────┤
 //! │     RNDIS Protocol Layer            │  ← This crate implements
 //! ├─────────────────────────────────────┤
-//! │      NetVsc Transport Layer         │  ← This crate implements  
+//! │      NetVsc Transport Layer         │  ← This crate implements
 //! ├─────────────────────────────────────┤
 //! │           VMBus Layer               │
 //! ├─────────────────────────────────────┤
@@ -45,7 +45,7 @@
 //! - Handles low-level message framing and buffer management
 //! - Manages shared memory regions for efficient data transfer
 //!
-//! ### RNDIS Responsibilities  
+//! ### RNDIS Responsibilities
 //! - Provides standardized network device abstraction
 //! - Handles network device initialization and capability negotiation
 //! - Manages network configuration through Object Identifiers (OIDs)
@@ -134,8 +134,8 @@ use crate::{
     driver::{
         hv::hyperv::{
             channel::VmBusChannel, ring_buffer::HyperVDoubledRingBuffer,
-            synthetic_device::VmBusSyntheticDevice, HyperV, VmBusOfferChannel, VmBusPacketHeader,
-            VmBusPacketType, VmBusXferPageHeader, HYPERV_PAGE_SIZE,
+            synthetic_device::VmBusSyntheticDevice, HyperV, VmBusGpaRange, VmBusOfferChannel,
+            VmBusPacketHeader, VmBusPacketType, VmBusXferPageHeader, HYPERV_PAGE_SIZE,
         },
         net::{EtherType, EthernetFrameHeader, Ipv4Header, MacAddress},
     },
@@ -187,7 +187,7 @@ const NETVSC_RNDIS_FILTER_PACKET_TYPE_PROMISCUOUS: u32 = 0x20;
 
 /// All known NetVSC protocol versions negotiated between guest and host NICs.
 ///
-/// Currently, our NIC driver supports only `Version6_1`.  
+/// Currently, our NIC driver supports only `Version6_1`.
 /// Future versions exist for reference.
 ///
 /// The numeric values follow the Hyper-V specification.
@@ -466,7 +466,7 @@ pub struct NetVscSendNdisConfig {
 }
 
 /// Message sent by the guest to inform the host about the NDIS (Network Driver Interface Specification)
-/// version it will be using.  
+/// version it will be using.
 #[derive(Debug, Copy, Clone)]
 #[repr(C, packed)]
 pub struct NetVscSendNdisVersion {
@@ -483,7 +483,7 @@ pub struct NetVscSendNdisVersion {
     reserved: [u8; 20 + 8],
 }
 
-/// Message sent by the guest to inform the host about the location of the  
+/// Message sent by the guest to inform the host about the location of the
 /// receive buffer that will be used for network packets.
 ///
 /// GPADL needs to be previously created and big enough to handle big amounts of data.
@@ -504,9 +504,9 @@ pub struct NetVscSendReceiveBuffer {
     reserved: [u8; 22 + 8],
 }
 
-/// Message sent by the host in response to a [`NetVscSendReceiveBuffer`] message.  
+/// Message sent by the host in response to a [`NetVscSendReceiveBuffer`] message.
 ///
-/// This message confirms that the receive buffer GPADL mapping was accepted  
+/// This message confirms that the receive buffer GPADL mapping was accepted
 /// and specifies how the buffer is divided into **sections** for suballocations.
 ///
 /// Each section is subdivided into fixed-size suballocations.
@@ -539,7 +539,7 @@ pub struct NetVscSendReceiveBufferCompletion {
 
 /// Describes a contiguous portion of the receive buffer.
 ///
-/// Each section specifies the range of memory in the buffer, how large  
+/// Each section specifies the range of memory in the buffer, how large
 /// each suballocation is, and how many suballocations exist.
 #[derive(Debug, Copy, Clone)]
 #[repr(C, packed)]
@@ -557,7 +557,7 @@ pub struct NetVscReceiveBufferSection {
     end_offset: u32,
 }
 
-/// Message sent by the guest to inform the host about the location of the  
+/// Message sent by the guest to inform the host about the location of the
 /// send buffer that will be used for network packets.
 ///
 /// GPADL needs to be previously created and big enough to handle big amounts of data.
@@ -1374,81 +1374,85 @@ impl VmBusNic {
 
     /// Handles an incoming RNDIS message received over the VMBus channel.
     fn handle_rndis_message(&self, xfer: &VmBusXferPageHeader) {
-        let data_ptr = unsafe {
-            self.state
-                .read()
-                .rx_buf_base
-                .add(xfer.range[0].starting_byte_offset as usize)
-        };
+        for i in 0..xfer.range_count {
+            let range_ptr = unsafe { &xfer.range[0] as *const VmBusGpaRange };
+            let range = unsafe { *range_ptr.add(i as usize) };
 
-        let rndis_header = unsafe { *(data_ptr as *const RndisMessageHeader) };
-        let message_length = rndis_header.length;
-        let page_set_id = xfer.page_set_id;
-        let rndis_message_type = rndis_header.message_type;
-
-        // Safety assert that our packet is in receive buffer.
-        assert_eq!(page_set_id, NETVSC_RECEIVE_BUFFER_ID);
-
-        if rndis_message_type != RndisMessageType::Indicate
-            && rndis_message_type != RndisMessageType::Packet
-        {
-            // It's response to our request packet, so save it in the `rndis_packet_buffer` for
-            // further processing.
-            without_interrupts(|| {
-                let slice = unsafe {
-                    slice::from_raw_parts(
-                        data_ptr,
-                        rndis_header.length as usize + size_of::<RndisMessageHeader>(),
-                    )
-                };
-
-                // Extract `request_id` from the received RNDIS packet.
-                //
-                // At this point, we don't yet know the exact message type of the packet.
-                // However, we *do* know that for all RNDIS response messages that are replies
-                // to a guest-initiated request, the `request_id` field is located at a fixed
-                // position immediately *after* the RNDIS message header.
-                //
-                // Since `RndisInitCompleteMessage` has `request_id` at that expected location,
-                // we temporarily cast the raw data pointer to `RndisInitCompleteMessage` solely
-                // to access the `request_id` field.
-                let packet_as_init = unsafe { *(data_ptr as *const RndisInitCompleteMessage) };
-                let request_id = packet_as_init.request_id;
-
+            let data_ptr = unsafe {
                 self.state
-                    .write()
-                    .rndis_packet_buffer
-                    .insert(request_id, slice.to_vec().into_boxed_slice())
-            });
+                    .read()
+                    .rx_buf_base
+                    .add(range.starting_byte_offset as usize)
+            };
 
-            return;
-        }
+            let rndis_header = unsafe { *(data_ptr as *const RndisMessageHeader) };
+            let message_length = rndis_header.length;
+            let page_set_id = xfer.page_set_id;
+            let rndis_message_type = rndis_header.message_type;
 
-        if rndis_message_type == RndisMessageType::Packet {
-            let rndis_message = unsafe { *(data_ptr as *const RndisPacketMessage) };
-            assert_eq!({ xfer.range_count }, 1);
+            // Safety assert that our packet is in receive buffer.
+            assert_eq!(page_set_id, NETVSC_RECEIVE_BUFFER_ID);
 
-            let eth_data =
-                unsafe { data_ptr.add(8 + rndis_message.data.offset as usize) as *const u8 };
+            if rndis_message_type != RndisMessageType::Indicate
+                && rndis_message_type != RndisMessageType::Packet
+            {
+                // It's response to our request packet, so save it in the `rndis_packet_buffer` for
+                // further processing.
+                without_interrupts(|| {
+                    let slice = unsafe {
+                        slice::from_raw_parts(
+                            data_ptr,
+                            rndis_header.length as usize + size_of::<RndisMessageHeader>(),
+                        )
+                    };
 
-            // Now the data is extracted
-            // @TODO: Call higher level drivers to handle Ethernet packet and decapsulate it.
+                    // Extract `request_id` from the received RNDIS packet.
+                    //
+                    // At this point, we don't yet know the exact message type of the packet.
+                    // However, we *do* know that for all RNDIS response messages that are replies
+                    // to a guest-initiated request, the `request_id` field is located at a fixed
+                    // position immediately *after* the RNDIS message header.
+                    //
+                    // Since `RndisInitCompleteMessage` has `request_id` at that expected location,
+                    // we temporarily cast the raw data pointer to `RndisInitCompleteMessage` solely
+                    // to access the `request_id` field.
+                    let packet_as_init = unsafe { *(data_ptr as *const RndisInitCompleteMessage) };
+                    let request_id = packet_as_init.request_id;
 
-            let eth_frame = unsafe { *(eth_data as *const _ as *const EthernetFrameHeader) };
-            let ether_type = eth_frame.ether_type;
-            log::debug!("Got Ethernet frame: {eth_frame:x?}");
-            if ether_type == EtherType::Ipv4 {
-                let ip_header = unsafe {
-                    *(eth_data.add(size_of::<EthernetFrameHeader>()) as *const Ipv4Header)
-                };
+                    self.state
+                        .write()
+                        .rndis_packet_buffer
+                        .insert(request_id, slice.to_vec().into_boxed_slice())
+                });
 
-                log::debug!("with ip packet header: {ip_header:?}")
+                return;
             }
-        } else if rndis_message_type == RndisMessageType::Indicate {
-            // link went up/went down/something changed, need to track NIC state internally and react for such messages
-            let rndis_message = unsafe { *(data_ptr as *const RndisIndicateMessage) };
 
-            log::debug!("Got rndis indicate message: {rndis_message:?}");
+            if rndis_message_type == RndisMessageType::Packet {
+                let rndis_message = unsafe { *(data_ptr as *const RndisPacketMessage) };
+
+                let eth_data =
+                    unsafe { data_ptr.add(8 + rndis_message.data.offset as usize) as *const u8 };
+
+                // Now the data is extracted
+                // @TODO: Call higher level drivers to handle Ethernet packet and decapsulate it.
+
+                let eth_frame = unsafe { *(eth_data as *const _ as *const EthernetFrameHeader) };
+                let ether_type = eth_frame.ether_type;
+                log::debug!("Got Ethernet frame: {eth_frame:x?}");
+                if ether_type == EtherType::Ipv4 {
+                    let ip_header = unsafe {
+                        *(eth_data.add(size_of::<EthernetFrameHeader>()) as *const Ipv4Header)
+                    };
+
+                    log::debug!("with ip packet header: {ip_header:?}")
+                }
+            } else if rndis_message_type == RndisMessageType::Indicate {
+                // link went up/went down/something changed, need to track NIC state internally and react for such messages
+                let rndis_message = unsafe { *(data_ptr as *const RndisIndicateMessage) };
+
+                log::debug!("Got rndis indicate message: {rndis_message:?}");
+            }
         }
     }
 

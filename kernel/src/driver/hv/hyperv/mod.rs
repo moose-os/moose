@@ -118,7 +118,7 @@
 //! ```
 //!
 //! ## Summary Table
-//! | Packet Type      | Extra Fields After Header      | Usage                          
+//! | Packet Type      | Extra Fields After Header      | Usage
 //! |------------------|--------------------------------|---------------------------------------------------------------------------|
 //! | Normal           | None                           | Standard data packets                                                     |
 //! | GPA Direct       | GPA ranges + PFNs              | Guest->Host transfers with separate data buffer somewhere in memory       |
@@ -452,7 +452,7 @@ pub const HYPERV_DEVICE_GUIDS: [(Guid, &str); 20] = [
 
 /// Starting GPADL (Guest Physical Address Descriptor List) ID.
 ///
-/// Hyper‑V requires each GPADL mapping to have a unique ID.  
+/// Hyper‑V requires each GPADL mapping to have a unique ID.
 /// This constant is the base ID from which new GPADL IDs are assigned.
 ///
 /// The value is the policy decision only.
@@ -670,7 +670,7 @@ pub struct VmBusVersionResponse {
     header: VmBusMessageHeader,
 
     /// Boolean flag indicating if the requested version is supported.
-    ///  
+    ///
     /// Represented as a `u8` in memory: 1 = true, 0 = false.
     version_supported: bool,
 
@@ -695,7 +695,7 @@ pub struct VmBusVersionResponse {
 /// [VmBusGPADLHeader] + [VmBusGpaRange; number_of_range_descriptors] + PFNs array
 /// ```
 ///
-/// Note:  
+/// Note:
 /// - The `range` field here represents the first `VmBusGpaRange`.
 /// - Additional `VmBusGpaRange` structs and PFNs (Page Frame Numbers)
 ///   immediately follow this header in memory but are not represented directly
@@ -884,7 +884,7 @@ pub struct VmBusOpenChannelResult {
 
 /// Header for a normal VMBus packet.
 ///
-/// The `packet_type` field corresponds to `VmBusPacketType` values,  
+/// The `packet_type` field corresponds to `VmBusPacketType` values,
 /// but here it is stored as a `u16` (instead of the usual `u64`).
 #[derive(Copy, Clone, Debug)]
 #[repr(C, packed)]
@@ -975,7 +975,7 @@ pub struct VmBusXferPageHeader {
     range_count: u32,
 
     /// First GPA range descriptor.
-    range: [VmBusGpaRange; 1],
+    range: [VmBusGpaRange; 16],
 }
 
 /// Represents a generic VMBus packet header.
@@ -1381,8 +1381,8 @@ impl HyperV {
         );
 
         let mut count = Msr::new(HYPERV_X64_MSR_STIMER0_COUNT);
-        // Count is measured in 100ns units. We want to fire every 500ms (0.5s), so 500ms/100ns is 5_000_000.
-        unsafe { count.write(5_000_000) };
+        // Count is measured in 100ns units. We want to fire every 10ms (0.01s), so 10ms/100ns is 5_000_000.
+        unsafe { count.write(100_000) };
 
         // Enable the timer
         let mut config = Msr::new(HYPERV_X64_MSR_STIMER0_CONFIG);
@@ -1509,7 +1509,7 @@ impl HyperV {
     ///
     /// # Overview
     /// This function is invoked when the VMBus synthetic interrupt (SINT)
-    /// assigned to the Synthetic Interrupt Message Page (SIMP) fires.  
+    /// assigned to the Synthetic Interrupt Message Page (SIMP) fires.
     /// It processes pending messages sent from the Hyper-V host to the
     /// guest through the message page.
     pub fn handle_simp_irq(&self) {
