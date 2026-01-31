@@ -99,7 +99,7 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, kernel_ptr: *const Ker
 
     *AP_STARTUP_SPINLOCK.write() = 1;
 
-    local_apic.enable_timer();
+    //local_apic.enable_timer();
 
     loop {
         asm!("hlt");
