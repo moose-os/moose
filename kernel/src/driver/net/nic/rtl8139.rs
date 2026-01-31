@@ -509,13 +509,20 @@ impl Rtl8139 {
         );
 
         without_interrupts(|| {
-            let rtl8139 = self.inner.lock();
+            let pci_device = state.pci_device.lock();
 
-            {
-                let pci_device = rtl8139.pci_device.lock();
+            // Enable DMA (Bus Master)
+            pci_device.enable_dma();
 
-                // Enable DMA (Bus Master)
-                pci_device.enable_dma();
+            // Get interrupt line from the PCI configuration space
+            //
+            // This is weird actually, because it should be totally random when using APIC + IRQ sharing, but in QEMU
+            // for some reason it works.
+            let interrupt_line = pci_device.get_interrupt_line();
+            let irq = kernel_ref()
+                .irq_allocator
+                .lock()
+                .allocate_irq(IrqLevel::NetworkInterfaceCard);
 
                 // Get interrupt line from the PCI configuration space
                 //
@@ -528,12 +535,19 @@ impl Rtl8139 {
                     .lock()
                     .allocate_irq(IrqLevel::NetworkInterfaceCard);
 
-                debug!(
-                    "[RTL8139] Using IRQ#{} with interrupt line {}",
-                    irq, interrupt_line
-                );
+            let redirection_entry = RedirectionEntry::new()
+                .with_delivery_mode(DeliveryMode::Fixed)
+                .with_destination(0)
+                .with_mask(false)
+                .with_destination_mode(DestinationMode::Physical)
+                .with_interrupt_vector(irq)
+                .with_pin_polarity(PinPolarity::ActiveHigh)
+                .with_trigger_mode(TriggerMode::Edge);
 
-                let inner = Arc::clone(&self.inner);
+            kernel_ref()
+                .apic
+                .read()
+                .redirect_interrupt(redirection_entry, interrupt_line);
 
                 register_interrupt_handler(
                     irq,
@@ -561,14 +575,14 @@ impl Rtl8139 {
             }
 
             // Set the LWAKE and LWPTN to active high. This should power on the device.
-            outb(rtl8139.io_base + CONFIG_1_REGISTER, 0x00);
+            outb(state.io_base + CONFIG_1_REGISTER, 0x00);
 
             // Perform software reset to make sure there's no garbage in buffers or registers.
-            outb(rtl8139.io_base + COMMAND_REGISTER, RST_BIT);
+            outb(state.io_base + COMMAND_REGISTER, RST_BIT);
 
             // Wait until the device reports success.
             loop {
-                if (inb(rtl8139.io_base + COMMAND_REGISTER) & RST_BIT) == 0 {
+                if (inb(state.io_base + COMMAND_REGISTER) & RST_BIT) == 0 {
                     break;
                 }
             }
@@ -577,13 +591,13 @@ impl Rtl8139 {
             let rx_buffer_physical_address = memory_manager()
                 .read()
                 .translate_virtual_address_to_physical_for_current_address_space(
-                    VirtualAddress::new(rtl8139.rx_buffer as u64),
+                    VirtualAddress::new(state.rx_buffer as u64),
                 )
                 .unwrap()
                 .as_u64();
 
             outl(
-                rtl8139.io_base + RBSTART_REGISTER,
+                state.io_base + RBSTART_REGISTER,
                 rx_buffer_physical_address as u32,
             );
 
@@ -592,7 +606,7 @@ impl Rtl8139 {
             // We're setting Tx OK Interrupt (bit 2) and Rx OK Interrupt (bit 0)
             // For more settings see Realtek RTL8139 DataSheet table at page 18
             outw(
-                rtl8139.io_base + INTERRUPT_MASK_REGISTER,
+                state.io_base + INTERRUPT_MASK_REGISTER,
                 (1 << 2) | 1 | (1 << 4),
             );
 
@@ -606,7 +620,7 @@ impl Rtl8139 {
 
             // Initialize receiver options
             outl(
-                rtl8139.io_base + RECEIVE_CONFIGURATION_REGISTER,
+                state.io_base + RECEIVE_CONFIGURATION_REGISTER,
                 // WRAP bit would be the best setting, but for some reason
                 // QEMU does not support it
                 (rx_buffer_size_bits << 11) |
@@ -618,7 +632,7 @@ impl Rtl8139 {
 
             // Finally, enable receiver and transmitter
             //                                        RE      |  TE
-            outb(rtl8139.io_base + COMMAND_REGISTER, (1 << 3) | (1 << 2));
+            outb(state.io_base + COMMAND_REGISTER, (1 << 3) | (1 << 2));
         });
     }
     */
