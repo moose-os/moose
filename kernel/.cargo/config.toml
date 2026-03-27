@@ -4,3 +4,4 @@ target = "x86_64-moose.json"
 [unstable]
 build-std-features = ["compiler-builtins-mem"]
 build-std = ["alloc", "core", "compiler_builtins"]
+json-target-spec = true
