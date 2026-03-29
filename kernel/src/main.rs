@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 #![feature(allocator_api)]
-#![feature(string_remove_matches)]
 #![no_std]
 #![no_main]
 
