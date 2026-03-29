@@ -1,7 +1,8 @@
-use crate::arch::x86::asm::{inl, outl};
-use alloc::vec;
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
+
 use log::debug;
+
+use crate::arch::x86::asm::{inl, outl};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;
 const CONFIG_DATA: u16 = 0xCFC;

@@ -1,7 +1,8 @@
 use core::ptr;
 
-use crate::font::DEFAULT_ASCII_FONT;
 use limine::framebuffer::Framebuffer;
+
+use crate::font::DEFAULT_ASCII_FONT;
 
 const BITS_PER_PIXEL: u64 = 32;
 const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;

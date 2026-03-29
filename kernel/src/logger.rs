@@ -1,9 +1,11 @@
-use crate::{cpu, serial::Serial, terminal::Terminal};
 use alloc::sync::Arc;
 use core::fmt::Write;
+
 use log::{LevelFilter, Log, SetLoggerError};
 use spin::{Mutex, Once, RwLock};
 use x86_64::instructions::interrupts;
+
+use crate::{cpu, serial::Serial, terminal::Terminal};
 
 static BOOT_LOGGER: Once<BootLogger> = Once::new();
 static POST_BOOT_LOGGER: Once<PostBootLogger> = Once::new();

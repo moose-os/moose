@@ -1,12 +1,13 @@
+use core::{
+    fmt::Debug,
+    ops::{Index, IndexMut},
+    ptr,
+};
+
 use bitflags::bitflags;
-use core::fmt::Debug;
-use core::ops::{Index, IndexMut};
-use core::ptr;
-use limine::memory_map::EntryType;
-use limine::response::MemoryMapResponse;
+use limine::{memory_map::EntryType, response::MemoryMapResponse};
 use snafu::Snafu;
-use spin::once::Once;
-use spin::RwLock;
+use spin::{once::Once, RwLock};
 use x86_64::instructions::tlb;
 
 pub const PAGE_SIZE: usize = 4096;

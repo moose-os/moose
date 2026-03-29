@@ -1,12 +1,14 @@
-use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress, PAGE_SIZE};
 use core::{
     alloc::{GlobalAlloc, Layout},
     cmp::max,
     ptr::NonNull,
 };
+
 use libm::ceilf;
 use linked_list_allocator::Heap;
 use spin::{Mutex, Once};
+
+use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress, PAGE_SIZE};
 
 pub(crate) const HEAP_START: usize = 0x4444_4444_0000;
 const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;

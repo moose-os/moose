@@ -1,9 +1,10 @@
 use alloc::{boxed::Box, vec::Vec};
-use bitfield_struct::bitfield;
 use core::{
     arch::{asm, naked_asm},
     ffi::CStr,
 };
+
+use bitfield_struct::bitfield;
 use log::{error, info, warn};
 use x86_64::registers::control::Cr2;
 
@@ -53,7 +54,7 @@ macro_rules! exception_handler {
                         pop rdx
                         pop rcx
                         pop rax
-                        
+
                         iretq
                     ",
                     sym $name

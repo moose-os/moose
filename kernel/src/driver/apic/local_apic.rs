@@ -1,24 +1,30 @@
-use crate::arch::x86::gdt::{GDT_DESCRIPTOR, TSS};
-use crate::arch::x86::idt::IDT;
-use crate::arch::x86::use_kernel_page_table;
-use crate::cpu::ProcessorControlBlock;
-use crate::driver::pit::PIT;
-use crate::kernel::{kernel_ref, Kernel};
-use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress};
-use crate::process::{Registers, Status};
-use crate::scheduler::{self, TIMEOUT_QUEUE};
-use crate::InterruptStack;
 use alloc::sync::Arc;
-use core::alloc::Layout;
-use core::arch::{asm, naked_asm};
-use core::sync::atomic::Ordering;
 use core::{
+    alloc::Layout,
+    arch::{asm, naked_asm},
     mem::{self, offset_of},
     ptr::{self, addr_of},
+    sync::atomic::Ordering,
 };
+
 use log::info;
 use spin::RwLock;
 use x86_64::registers::control::{Cr4, Cr4Flags};
+
+use crate::{
+    arch::x86::{
+        gdt::{GDT_DESCRIPTOR, TSS},
+        idt::IDT,
+        use_kernel_page_table,
+    },
+    cpu::ProcessorControlBlock,
+    driver::pit::PIT,
+    kernel::{kernel_ref, Kernel},
+    memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
+    process::{Registers, Status},
+    scheduler::{self, TIMEOUT_QUEUE},
+    InterruptStack,
+};
 
 pub const LOCAL_APIC_LAPIC_ID_REGISTER: u32 = 0x20;
 pub const LOCAL_APIC_LAPIC_VERSION_REGISTER: u32 = 0x23;

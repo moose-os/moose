@@ -1,14 +1,16 @@
-use crate::{
-    kernel::kernel_ref,
-    memory::PageTable,
-    scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
-};
 use alloc::{sync::Arc, vec::Vec};
 use core::{
     ffi::c_void,
     sync::atomic::{AtomicBool, AtomicUsize},
 };
+
 use spin::{Mutex, MutexGuard};
+
+use crate::{
+    kernel::kernel_ref,
+    memory::PageTable,
+    scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
+};
 
 /// Default priority assigned to new threads (middle of the range).
 pub const DEFAULT_THREAD_PRIORITY: usize = PRIORITIES_NUM / 2;

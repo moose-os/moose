@@ -1,6 +1,6 @@
+use alloc::string::String;
 use core::fmt::{self, Debug, Formatter};
 
-use alloc::string::String;
 use phf::{phf_map, Map};
 
 // https://github.com/kernkonzept/io/blob/master/io/doc/acpi-pnp-ids.txt

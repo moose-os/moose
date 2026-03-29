@@ -1,27 +1,35 @@
-use core::alloc::Layout;
-use core::ffi::c_void;
-use core::mem;
-use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use core::{
+    alloc::Layout,
+    ffi::c_void,
+    mem,
+    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+};
 
-use crate::allocator::HEAP_START;
-use crate::driver::acpi::Acpi;
-use crate::driver::apic::Apic;
-use crate::linker::Linker;
-use crate::memory::{
-    current_page_table, memory_manager, Frame, Page, PageFlags, VirtualAddress, PAGE_SIZE,
-};
-use crate::process::{
-    Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
-    HIGHEST_THREAD_PRIORITY,
-};
-use crate::{arch::irq::IrqAllocator, memory::PageTable};
-use crate::{scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST};
-use alloc::vec::Vec;
-use alloc::{boxed::Box, sync::Arc};
 use spin::{Mutex, Once, RwLock};
-use x86_64::registers::rflags;
-use x86_64::registers::segmentation::{Segment64, GS};
-use x86_64::structures::DescriptorTablePointer;
+use x86_64::{
+    registers::{
+        rflags,
+        segmentation::{Segment64, GS},
+    },
+    structures::DescriptorTablePointer,
+};
+
+use crate::{
+    allocator::HEAP_START,
+    arch::irq::IrqAllocator,
+    driver::{acpi::Acpi, apic::Apic},
+    linker::Linker,
+    memory::{
+        current_page_table, memory_manager, Frame, Page, PageFlags, PageTable, VirtualAddress,
+        PAGE_SIZE,
+    },
+    process::{
+        Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
+        HIGHEST_THREAD_PRIORITY,
+    },
+    scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST,
+};
 
 static KERNEL: Once<Arc<Kernel>> = Once::new();
 

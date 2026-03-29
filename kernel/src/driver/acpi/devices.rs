@@ -1,3 +1,4 @@
+use alloc::{borrow::ToOwned, boxed::Box, fmt, string::String, sync::Arc, vec::Vec};
 use core::{
     ffi::{c_void, CStr},
     fmt::{Debug, Formatter},
@@ -17,8 +18,6 @@ use acpica_rs::{
     },
     AE_OK,
 };
-
-use alloc::{borrow::ToOwned, boxed::Box, fmt, string::String, sync::Arc, vec::Vec};
 use spin::Mutex;
 
 use super::hid::AcpiHid;

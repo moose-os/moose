@@ -21,46 +21,58 @@ mod serial;
 mod terminal;
 mod vga;
 
-use crate::allocator::initialize_heap;
-use crate::driver::{pic::PIC, pit::PIT};
-use crate::memory::initialize_memory_manager;
-use crate::process::DEFAULT_THREAD_PRIORITY;
-use crate::terminal::Terminal;
 use alloc::sync::Arc;
-use arch::x86::gdt::{
-    GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
-    SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS, TSS_INDEX,
+use core::{
+    alloc::Layout,
+    arch::asm,
+    mem,
+    ptr::{self, addr_of},
 };
-use core::alloc::Layout;
-use core::arch::asm;
-use core::ptr::addr_of;
-use core::{mem, ptr};
-use driver::acpi::{create_device_list, initialize_acpica};
-use driver::net::nic::rtl8139::Rtl8139;
-use kernel::set_kernel;
-use limine::paging::Mode;
-use limine::request::{
-    FramebufferRequest, HhdmRequest, KernelAddressRequest, MemoryMapRequest, PagingModeRequest,
-    RsdpRequest, StackSizeRequest,
-};
-use limine::BaseRevision;
-use log::{debug, error, info};
-use memory::{memory_manager, Frame, PageFlags, PageTable, PhysicalAddress};
-use raw_cpuid::CpuId;
-use scheduler::Scheduler;
-use spin::{Mutex, RwLock};
-use x86_64::registers::control::{Cr3, Cr4, Cr4Flags, Efer, EferFlags};
-use x86_64::structures::tss::TaskStateSegment;
 
-use crate::arch::irq::{IrqAllocator, IrqLevel};
-use crate::driver::acpi::{Acpi, Rsdp};
-use crate::driver::apic::{Apic, LocalApic};
-use crate::driver::pci::Pci;
-use crate::kernel::Kernel;
+use limine::{
+    paging::Mode,
+    request::{
+        FramebufferRequest, HhdmRequest, KernelAddressRequest, MemoryMapRequest, PagingModeRequest,
+        RsdpRequest, StackSizeRequest,
+    },
+    BaseRevision,
+};
+use log::{debug, error, info};
+use raw_cpuid::CpuId;
+use spin::{Mutex, RwLock};
+use x86_64::{
+    registers::control::{Cr3, Cr4, Cr4Flags, Efer, EferFlags},
+    structures::tss::TaskStateSegment,
+};
+
 use crate::{
+    allocator::initialize_heap,
+    arch::{
+        irq::{IrqAllocator, IrqLevel},
+        x86::gdt::{
+            GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
+            SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS,
+            TSS_INDEX,
+        },
+    },
+    driver::{
+        acpi::{create_device_list, initialize_acpica, Acpi, Rsdp},
+        apic::{Apic, LocalApic},
+        net::nic::rtl8139::Rtl8139,
+        pci::Pci,
+        pic::PIC,
+        pit::PIT,
+    },
+    kernel::{set_kernel, Kernel},
     logger::{init_logger, switch_to_post_boot_logger},
-    memory::FrameAllocator,
+    memory::{
+        initialize_memory_manager, memory_manager, Frame, FrameAllocator, PageFlags, PageTable,
+        PhysicalAddress,
+    },
+    process::DEFAULT_THREAD_PRIORITY,
+    scheduler::Scheduler,
     serial::SerialPort,
+    terminal::Terminal,
     vga::Vga,
 };
 

@@ -1,10 +1,10 @@
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     arch::{asm, naked_asm},
     mem,
     sync::atomic::Ordering,
 };
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use spin::{once::Once, Mutex};
 use x86_64::{
     instructions::interrupts,

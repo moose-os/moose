@@ -1,5 +1,6 @@
-use crate::arch::x86::asm::{inb, outb};
 use spin::Mutex;
+
+use crate::arch::x86::asm::{inb, outb};
 
 const COM1: u16 = 0x3f8;
 

@@ -1,4 +1,4 @@
-pub mod acpica;
+mod acpica;
 mod devices;
 mod hid;
 mod madt;
@@ -6,6 +6,14 @@ mod rsdp;
 mod sdt;
 
 pub use acpica::*;
+pub use devices::*;
+pub use madt::*;
+pub use rsdp::*;
+pub use sdt::*;
+
+use alloc::{boxed::Box, sync::Arc};
+use core::{mem, ptr, slice};
+
 use acpica_rs::{
     set_os_services_implementation,
     sys::{
@@ -14,16 +22,10 @@ use acpica_rs::{
     },
     AE_OK,
 };
-pub use devices::*;
-pub use madt::*;
-pub use rsdp::*;
-pub use sdt::*;
 
 use crate::memory::{
     memory_manager, Frame, MemoryError, Page, PageFlags, PhysicalAddress, VirtualAddress,
 };
-use alloc::{boxed::Box, sync::Arc};
-use core::{mem, ptr, slice};
 
 /// Root System Description Pointer Signature
 const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";

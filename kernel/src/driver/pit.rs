@@ -1,10 +1,16 @@
-use crate::arch::x86::asm::outb;
-use crate::arch::x86::idt::{register_interrupt_handler, ExceptionFrame};
-use crate::driver::pic::{PIC, PIC_1_OFFSET};
 use alloc::boxed::Box;
 use core::arch::asm;
+
 use spin::RwLock;
 use x86_64::instructions::interrupts::without_interrupts;
+
+use crate::{
+    arch::x86::{
+        asm::outb,
+        idt::{register_interrupt_handler, ExceptionFrame},
+    },
+    driver::pic::{PIC, PIC_1_OFFSET},
+};
 
 // CPU Timer
 const CHANNEL0_DATA_PORT: u16 = 0x40;

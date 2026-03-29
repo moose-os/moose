@@ -1,17 +1,16 @@
-use crate::arch::x86::asm::{inb, inw, outb, outl};
-use crate::driver::pci::PciDevice;
-use crate::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE};
-use alloc::borrow::ToOwned;
-use alloc::string::String;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use alloc::{format, vec};
-use core::cmp::min;
-use core::mem::transmute;
+use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec, vec::Vec};
+use core::{cmp::min, mem::transmute};
+
 use deku::bitvec::{BitSlice, Msb0};
 use deku::{DekuError, DekuRead};
 use log::debug;
 use spin::Mutex;
+
+use crate::{
+    arch::x86::asm::{inb, inw, outb, outl},
+    driver::pci::PciDevice,
+    memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+};
 
 const ATA_PRIMARY_IO_PORT: u16 = 0x1F0;
 const ATA_SECONDARY_IO_PORT: u16 = 0x170;

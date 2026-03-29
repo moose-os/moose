@@ -3,6 +3,7 @@ pub mod gdt;
 pub mod idt;
 
 use core::arch;
+
 use x86_64::{
     instructions::tlb,
     registers::control::{Cr0, Cr0Flags, Cr3, Cr3Flags, Cr4, Cr4Flags},

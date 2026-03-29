@@ -4,22 +4,24 @@ mod local_apic;
 pub use io_apic::*;
 pub use local_apic::*;
 
-use crate::arch::x86::idt::{IdtEntry, IDT};
-use crate::cpu::MAXIMUM_CPU_CORES;
-use crate::driver::acpi::{Acpi, MadtEntryInner};
-use crate::driver::pit::PIT;
-use crate::kernel::Kernel;
-use crate::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE};
-use alloc::alloc::alloc_zeroed;
-use alloc::sync::Arc;
-use alloc::vec::Vec;
-use core::alloc::Layout;
-use core::arch::asm;
-use core::ptr;
+use alloc::{alloc::alloc_zeroed, sync::Arc, vec::Vec};
+use core::{alloc::Layout, arch::asm, ptr};
+
 use log::{debug, warn};
 use raw_cpuid::CpuId;
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
+
+use crate::{
+    arch::x86::idt::{IdtEntry, IDT},
+    cpu::MAXIMUM_CPU_CORES,
+    driver::{
+        acpi::{Acpi, MadtEntryInner},
+        pit::PIT,
+    },
+    kernel::Kernel,
+    memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+};
 
 pub struct Apic {
     pub local_apic_timer_ticks_per_second: u64,

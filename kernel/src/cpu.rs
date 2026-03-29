@@ -1,8 +1,12 @@
-use crate::driver::apic::LocalApic;
 use alloc::boxed::Box;
 use core::cell::OnceCell;
-use x86_64::registers::segmentation::{Segment64, GS};
-use x86_64::VirtAddr;
+
+use x86_64::{
+    registers::segmentation::{Segment64, GS},
+    VirtAddr,
+};
+
+use crate::driver::apic::LocalApic;
 
 pub(crate) const MAXIMUM_CPU_CORES: usize = 4;
 
