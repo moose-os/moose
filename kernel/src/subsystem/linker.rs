@@ -7,7 +7,9 @@ use goblin::elf::{
 };
 use snafu::Snafu;
 
-use crate::memory::{MemoryManager, Page, PageFlags, PageTable, VirtualAddress, PAGE_SIZE};
+use crate::subsystem::memory::{
+    MemoryManager, Page, PageFlags, PageTable, VirtualAddress, PAGE_SIZE,
+};
 
 pub struct Linker;
 

@@ -13,16 +13,18 @@ use x86_64::registers::control::{Cr4, Cr4Flags};
 
 use crate::{
     arch::x86::{
+        cpu::ProcessorControlBlock,
         gdt::{GDT_DESCRIPTOR, TSS},
         idt::IDT,
         use_kernel_page_table,
     },
-    cpu::ProcessorControlBlock,
     driver::pit::PIT,
     kernel::{kernel_ref, Kernel},
-    memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
-    process::{Registers, Status},
-    scheduler::{self, TIMEOUT_QUEUE},
+    subsystem::{
+        memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
+        process::{Registers, Status},
+        scheduler::{self, TIMEOUT_QUEUE},
+    },
     InterruptStack,
 };
 

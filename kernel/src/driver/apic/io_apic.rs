@@ -5,7 +5,7 @@ use log::debug;
 
 use crate::{
     driver::acpi::MadtIoApic,
-    memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
+    subsystem::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
 };
 
 const IO_APIC_ID_REGISTER: u32 = 0x00;

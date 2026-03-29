@@ -8,8 +8,10 @@ use spin::{Mutex, MutexGuard};
 
 use crate::{
     kernel::kernel_ref,
-    memory::PageTable,
-    scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
+    subsystem::{
+        memory::PageTable,
+        scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
+    },
 };
 
 /// Default priority assigned to new threads (middle of the range).

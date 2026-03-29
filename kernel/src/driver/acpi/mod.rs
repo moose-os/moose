@@ -23,7 +23,7 @@ use acpica_rs::{
     AE_OK,
 };
 
-use crate::memory::{
+use crate::subsystem::memory::{
     memory_manager, Frame, MemoryError, Page, PageFlags, PhysicalAddress, VirtualAddress,
 };
 

@@ -13,7 +13,7 @@ use x86_64::{
     PhysAddr,
 };
 
-use crate::process::{Registers, Status, Thread, ThreadStack};
+use crate::subsystem::process::{Registers, Status, Thread, ThreadStack};
 
 static SCHEDULER: Scheduler = Scheduler::new();
 

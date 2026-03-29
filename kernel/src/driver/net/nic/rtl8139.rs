@@ -11,16 +11,18 @@ use crate::{
         irq::IrqLevel,
         x86::{
             asm::{inb, inw, outb, outl, outw},
+            cpu::ProcessorControlBlock,
             idt::{register_interrupt_handler, ExceptionFrame, VolatileRegisters},
         },
     },
-    cpu::ProcessorControlBlock,
     driver::{
         apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode},
         pci::PciDevice,
     },
     kernel::Kernel,
-    memory::{memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{
+        memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE,
+    },
 };
 
 const BUFE_BIT: u8 = 0x1;

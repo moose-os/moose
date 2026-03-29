@@ -16,19 +16,22 @@ use x86_64::{
 };
 
 use crate::{
-    allocator::HEAP_START,
     arch::irq::IrqAllocator,
     driver::{acpi::Acpi, apic::Apic},
-    linker::Linker,
-    memory::{
-        current_page_table, memory_manager, Frame, Page, PageFlags, PageTable, VirtualAddress,
-        PAGE_SIZE,
+    subsystem::{
+        allocator::HEAP_START,
+        linker::Linker,
+        memory::{
+            current_page_table, memory_manager, Frame, Page, PageFlags, PageTable, VirtualAddress,
+            PAGE_SIZE,
+        },
+        process::{
+            Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
+            HIGHEST_THREAD_PRIORITY,
+        },
+        scheduler,
     },
-    process::{
-        Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
-        HIGHEST_THREAD_PRIORITY,
-    },
-    scheduler, InterruptStack, KERNEL_ADDRESS_REQUEST,
+    InterruptStack, KERNEL_ADDRESS_REQUEST,
 };
 
 static KERNEL: Once<Arc<Kernel>> = Once::new();

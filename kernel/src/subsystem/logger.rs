@@ -5,7 +5,9 @@ use log::{LevelFilter, Log, SetLoggerError};
 use spin::{Mutex, Once, RwLock};
 use x86_64::instructions::interrupts;
 
-use crate::{cpu, serial::Serial, terminal::Terminal};
+use crate::{
+    arch::x86::cpu::ProcessorControlBlock, driver::serial::Serial, subsystem::terminal::Terminal,
+};
 
 static BOOT_LOGGER: Once<BootLogger> = Once::new();
 static POST_BOOT_LOGGER: Once<PostBootLogger> = Once::new();
@@ -112,7 +114,7 @@ impl Log for PostBootLogger {
 
     fn log(&self, record: &log::Record) {
         if self.enabled(record.metadata()) {
-            let cpu_id = unsafe { &*cpu::ProcessorControlBlock::get_pcb_for_current_processor() }
+            let cpu_id = unsafe { &*ProcessorControlBlock::get_pcb_for_current_processor() }
                 .apic_processor_id;
 
             interrupts::without_interrupts(|| {

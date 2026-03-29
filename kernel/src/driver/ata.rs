@@ -9,7 +9,7 @@ use spin::Mutex;
 use crate::{
     arch::x86::asm::{inb, inw, outb, outl},
     driver::pci::PciDevice,
-    memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
 };
 
 const ATA_PRIMARY_IO_PORT: u16 = 0x1F0;

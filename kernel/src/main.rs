@@ -5,20 +5,11 @@
 
 extern crate alloc;
 
-mod allocator;
 mod arch;
-mod cpu;
 mod driver;
 mod font;
 mod kernel;
-mod linker;
-mod logger;
-mod memory;
-mod process;
-mod scheduler;
-mod serial;
-mod terminal;
-mod vga;
+mod subsystem;
 
 use alloc::sync::Arc;
 use core::{
@@ -45,13 +36,15 @@ use x86_64::{
 };
 
 use crate::{
-    allocator::initialize_heap,
     arch::{
         irq::{IrqAllocator, IrqLevel},
-        x86::gdt::{
-            GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
-            SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS,
-            TSS_INDEX,
+        x86::{
+            cpu::ProcessorControlBlock,
+            gdt::{
+                GlobalDescriptorTableDescriptor, SegmentFlags, SystemSegmentDescriptor,
+                SystemSegmentDescriptorAttributes, SystemSegmentType, GDT, GDT_DESCRIPTOR, TSS,
+                TSS_INDEX,
+            },
         },
     },
     driver::{
@@ -61,18 +54,21 @@ use crate::{
         pci::Pci,
         pic::PIC,
         pit::PIT,
+        serial::SerialPort,
+        vga::Vga,
     },
     kernel::{set_kernel, Kernel},
-    logger::{init_logger, switch_to_post_boot_logger},
-    memory::{
-        initialize_memory_manager, memory_manager, Frame, FrameAllocator, PageFlags, PageTable,
-        PhysicalAddress,
+    subsystem::{
+        allocator::initialize_heap,
+        logger::{init_logger, switch_to_post_boot_logger},
+        memory::{
+            initialize_memory_manager, memory_manager, Frame, FrameAllocator, PageFlags, PageTable,
+            PhysicalAddress,
+        },
+        process::DEFAULT_THREAD_PRIORITY,
+        scheduler::Scheduler,
+        terminal::Terminal,
     },
-    process::DEFAULT_THREAD_PRIORITY,
-    scheduler::Scheduler,
-    serial::SerialPort,
-    terminal::Terminal,
-    vga::Vga,
 };
 
 /// Sets the base revision to the latest revision supported by the crate.
@@ -227,7 +223,7 @@ unsafe extern "C" fn _start() -> ! {
     PIT.wait_seconds(1);
     info!("Waiting has ended");
 
-    cpu::ProcessorControlBlock::create_pcb_for_current_processor(
+    ProcessorControlBlock::create_pcb_for_current_processor(
         CpuId::new()
             .get_feature_info()
             .unwrap()
@@ -258,7 +254,7 @@ unsafe extern "C" fn _start() -> ! {
     let pci_devices = Pci::build_device_tree();
 
     let bsp_lapic = LocalApic::initialize_for_current_processor(Arc::clone(&kernel));
-    let pcb = cpu::ProcessorControlBlock::get_pcb_for_current_processor();
+    let pcb = ProcessorControlBlock::get_pcb_for_current_processor();
     (*pcb).is_bsp = true;
 
     _ = (*pcb).local_apic.set(bsp_lapic);

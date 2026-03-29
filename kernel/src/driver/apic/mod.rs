@@ -13,14 +13,16 @@ use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
-    arch::x86::idt::{IdtEntry, IDT},
-    cpu::MAXIMUM_CPU_CORES,
+    arch::x86::{
+        cpu::MAXIMUM_CPU_CORES,
+        idt::{IdtEntry, IDT},
+    },
     driver::{
         acpi::{Acpi, MadtEntryInner},
         pit::PIT,
     },
     kernel::Kernel,
-    memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
 };
 
 pub struct Apic {

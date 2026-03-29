@@ -14,7 +14,7 @@ use libm::ceil;
 use crate::{
     arch::x86::asm::{inb, inl, inw, outb, outl, outw},
     driver::pci::Pci,
-    memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress, PAGE_SIZE},
 };
 
 struct SizePrefixedAllocation {

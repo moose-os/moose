@@ -1,4 +1,4 @@
-use crate::vga::{Rgb, Vga};
+use crate::driver::vga::{Rgb, Vga};
 
 pub struct Terminal {
     vga: Vga,

@@ -3,7 +3,7 @@ use core::mem;
 use bitfield_struct::bitfield;
 use bitflags::bitflags;
 
-use crate::cpu::MAXIMUM_CPU_CORES;
+use crate::arch::x86::cpu::MAXIMUM_CPU_CORES;
 
 pub(crate) static mut GDT_DESCRIPTOR: GlobalDescriptorTableDescriptor =
     GlobalDescriptorTableDescriptor::new(0, 0); // We can't obtain the address of GDT at compile-time, so we have to initialize this in _start
