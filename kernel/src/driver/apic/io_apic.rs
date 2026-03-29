@@ -1,7 +1,6 @@
 use core::ptr;
 
 use bitfield_struct::bitfield;
-use log::debug;
 
 use crate::{
     driver::acpi::MadtIoApic,

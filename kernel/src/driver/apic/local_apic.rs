@@ -7,7 +7,6 @@ use core::{
     sync::atomic::Ordering,
 };
 
-use log::info;
 use spin::RwLock;
 use x86_64::registers::control::{Cr4, Cr4Flags};
 

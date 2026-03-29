@@ -3,7 +3,6 @@ use core::{cmp::min, mem::transmute};
 
 use deku::bitvec::{BitSlice, Msb0};
 use deku::{DekuError, DekuRead};
-use log::debug;
 use spin::Mutex;
 
 use crate::{

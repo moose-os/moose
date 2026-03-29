@@ -7,7 +7,6 @@ pub use local_apic::*;
 use alloc::{alloc::alloc_zeroed, sync::Arc, vec::Vec};
 use core::{alloc::Layout, arch::asm, ptr};
 
-use log::{debug, warn};
 use raw_cpuid::CpuId;
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;

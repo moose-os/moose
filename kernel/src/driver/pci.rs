@@ -1,7 +1,5 @@
 use alloc::{vec, vec::Vec};
 
-use log::debug;
-
 use crate::arch::x86::asm::{inl, outl};
 
 const CONFIG_ADDRESS: u16 = 0xCF8;

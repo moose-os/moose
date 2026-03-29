@@ -5,6 +5,9 @@
 
 extern crate alloc;
 
+#[macro_use]
+extern crate log;
+
 mod arch;
 mod driver;
 mod font;
@@ -27,7 +30,6 @@ use limine::{
     },
     BaseRevision,
 };
-use log::{debug, error, info};
 use raw_cpuid::CpuId;
 use spin::{Mutex, RwLock};
 use x86_64::{

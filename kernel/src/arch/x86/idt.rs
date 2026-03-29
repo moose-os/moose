@@ -5,7 +5,6 @@ use core::{
 };
 
 use bitfield_struct::bitfield;
-use log::{error, info, warn};
 use x86_64::registers::control::Cr2;
 
 use super::{gdt::KERNEL_MODE_CODE_SEGMENT_INDEX, use_kernel_page_table};
