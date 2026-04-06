@@ -25,8 +25,8 @@ use core::{
 use limine::{
     paging::Mode,
     request::{
-        FramebufferRequest, HhdmRequest, KernelAddressRequest, MemoryMapRequest, PagingModeRequest,
-        RsdpRequest, StackSizeRequest,
+        ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest,
+        PagingModeRequest, RsdpRequest, StackSizeRequest,
     },
     BaseRevision,
 };
@@ -98,7 +98,7 @@ static RSDP_REQUEST: RsdpRequest = RsdpRequest::new();
 static STACK_SIZE_REQUEST: StackSizeRequest = StackSizeRequest::new().with_size(4 * 1024 * 1024); // 4 MiB
 
 #[used]
-static KERNEL_ADDRESS_REQUEST: KernelAddressRequest = KernelAddressRequest::new();
+static EXECUTABLE_ADDRESS_REQUEST: ExecutableAddressRequest = ExecutableAddressRequest::new();
 
 static mut KERNEL_PAGE_TABLE: *mut PageTable = ptr::null_mut();
 static mut KERNEL_PAGE_TABLE_PHYSICAL_ADDRESS: u64 = 0;

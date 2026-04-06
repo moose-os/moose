@@ -31,7 +31,7 @@ use crate::{
         },
         scheduler,
     },
-    InterruptStack, KERNEL_ADDRESS_REQUEST,
+    InterruptStack, EXECUTABLE_ADDRESS_REQUEST,
 };
 
 static KERNEL: Once<Arc<Kernel>> = Once::new();
@@ -254,7 +254,7 @@ impl Kernel {
 
         // map kernel in program's address space
         {
-            let kernel_virtual_base_address = KERNEL_ADDRESS_REQUEST
+            let kernel_virtual_base_address = EXECUTABLE_ADDRESS_REQUEST
                 .get_response()
                 .unwrap()
                 .virtual_base();
