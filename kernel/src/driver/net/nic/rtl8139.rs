@@ -11,7 +11,7 @@ use crate::{
         x86::{
             asm::{inb, inw, outb, outl, outw},
             cpu::ProcessorControlBlock,
-            idt::{register_interrupt_handler, ExceptionFrame, VolatileRegisters},
+            idt::{register_interrupt_handler_closure, ExceptionFrame, VolatileRegisters},
         },
     },
     driver::{
@@ -134,7 +134,7 @@ impl Rtl8139 {
 
                 let inner = Arc::clone(&self.inner);
 
-                register_interrupt_handler(
+                register_interrupt_handler_closure(
                     irq,
                     Box::new(
                         move |_isf: &ExceptionFrame, _registers: &VolatileRegisters| {

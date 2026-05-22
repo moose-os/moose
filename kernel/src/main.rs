@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-#![feature(allocator_api)]
+#![feature(allocator_api, const_default, const_trait_impl)]
 #![no_std]
 #![no_main]
 

@@ -59,7 +59,7 @@ pub static TRAMPOLINE_CODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tr
 pub static mut AP_STARTUP_SPINLOCK: RwLock<u8> = RwLock::new(0);
 
 pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Kernel) -> ! {
-    IDT.load();
+    IDT.lock().load();
     Cr4::write(Cr4::read() | Cr4Flags::FSGSBASE);
 
     asm!(

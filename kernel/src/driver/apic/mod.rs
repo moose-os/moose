@@ -37,10 +37,12 @@ impl Apic {
         );
 
         unsafe {
-            IDT.interrupts[timer_irq as usize - 32] =
+            IDT.lock().set_interrupt_entry(
+                timer_irq as usize - 32,
                 IdtEntry::kernel_mode_ring3_accessible_interrupt(
-                    raw_timer_interrupt_handler as usize as u64,
-                );
+                    raw_timer_interrupt_handler as *const () as u64,
+                ),
+            );
         }
 
         let io_apics = kernel_ref()

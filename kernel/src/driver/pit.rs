@@ -7,7 +7,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 use crate::{
     arch::x86::{
         asm::outb,
-        idt::{register_interrupt_handler, ExceptionFrame},
+        idt::{register_interrupt_handler_closure, ExceptionFrame},
     },
     driver::pic::PIC_1_OFFSET,
     kernel::kernel_ref,
@@ -71,7 +71,7 @@ impl ProgrammableIntervalTimer {
         outb(CHANNEL0_DATA_PORT, (divisor >> 8) as u8);
 
         // Set timer interrupt handler
-        register_interrupt_handler(
+        register_interrupt_handler_closure(
             PIT_TIMER,
             Box::new(|isf, _registers| pit_interrupt_handler(isf)),
         );
