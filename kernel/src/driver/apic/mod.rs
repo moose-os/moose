@@ -4,7 +4,7 @@ mod local_apic;
 pub use io_apic::*;
 pub use local_apic::*;
 
-use alloc::{alloc::alloc_zeroed, sync::Arc, vec::Vec};
+use alloc::{alloc::alloc_zeroed, vec::Vec};
 use core::{alloc::Layout, arch::asm, ptr};
 
 use raw_cpuid::CpuId;
@@ -16,23 +16,19 @@ use crate::{
         cpu::MAXIMUM_CPU_CORES,
         idt::{IdtEntry, IDT},
     },
-    driver::{
-        acpi::{Acpi, MadtEntryInner},
-        pit::PIT,
-    },
-    kernel::Kernel,
+    driver::acpi::MadtEntryInner,
+    kernel::kernel_ref,
     subsystem::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
 };
 
 pub struct Apic {
     pub local_apic_timer_ticks_per_second: u64,
     pub ms_per_tick: u64,
-    pub acpi: Arc<Acpi>,
     io_apics: Vec<Mutex<IoApic>>,
 }
 
 impl Apic {
-    pub fn initialize(acpi: Arc<Acpi>, timer_irq: u8) -> Apic {
+    pub fn initialize(timer_irq: u8) -> Apic {
         // Check if CPU supports APIC
         let cpuid = CpuId::new();
         assert!(
@@ -47,7 +43,8 @@ impl Apic {
                 );
         }
 
-        let io_apics = acpi
+        let io_apics = kernel_ref()
+            .acpi()
             .madt
             .entries
             .iter()
@@ -61,7 +58,6 @@ impl Apic {
         Apic {
             local_apic_timer_ticks_per_second: 0,
             ms_per_tick: 0,
-            acpi,
             io_apics,
         }
     }
@@ -87,7 +83,7 @@ impl Apic {
         );
     }
 
-    pub fn setup_other_application_processors(&self, kernel: Arc<Kernel>, local_apic: &LocalApic) {
+    pub fn setup_other_processors(&self, local_apic: &LocalApic) {
         let args = unsafe {
             // Map 0x8000 into memory. This shouldn't be mapped currently.
             let mut memory_manager = memory_manager().write();
@@ -120,7 +116,7 @@ impl Apic {
             // Address of kernel's AP initialization routine
             args.offset(1).write(ap_start as usize as u64);
             // Address of Kernel instance
-            args.offset(2).write(Arc::into_raw(kernel.clone()) as u64);
+            args.offset(2).write(kernel_ref() as *const _ as u64);
 
             args
         };
@@ -130,8 +126,8 @@ impl Apic {
             .unwrap()
             .initial_local_apic_id() as u16;
 
-        let cpu_core_count = self
-            .acpi
+        let cpu_core_count = kernel_ref()
+            .acpi()
             .madt
             .entries
             .iter()
@@ -150,7 +146,8 @@ impl Apic {
             );
         }
 
-        self.acpi
+        kernel_ref()
+            .acpi()
             .madt
             .entries
             .iter()
@@ -197,7 +194,7 @@ impl Apic {
 
                 unsafe {
                     while without_interrupts(|| *AP_STARTUP_SPINLOCK.read() == 0) {
-                        PIT.wait_sixteen_millis()
+                        kernel_ref().pit().read().wait_sixteen_millis();
                     }
                 }
             });
@@ -264,7 +261,7 @@ impl Apic {
         // Wait for the processor to execute BIOS code
         //
         // We should wait for approx 10ms, but because of low-resolution PIT usage we'll wait ~16ms
-        unsafe { PIT.wait_sixteen_millis() };
+        kernel_ref().pit().read().wait_sixteen_millis();
 
         // Finally, send STARTUP IPI
         //
@@ -284,7 +281,8 @@ impl Apic {
                 (bsp_local_apic.read_register(LOCAL_APIC_INTERRUPT_OPTIONS_REGISTER) & 0xFFF0F800)
                     | 0x608,
             );
-            unsafe { PIT.wait_sixteen_millis() }
+
+            kernel_ref().pit().read().wait_sixteen_millis();
         }
     }
 }

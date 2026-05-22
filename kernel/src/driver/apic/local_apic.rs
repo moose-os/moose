@@ -1,4 +1,3 @@
-use alloc::sync::Arc;
 use core::{
     alloc::Layout,
     arch::{asm, naked_asm},
@@ -17,7 +16,6 @@ use crate::{
         idt::IDT,
         use_kernel_page_table,
     },
-    driver::pit::PIT,
     kernel::{kernel_ref, Kernel},
     subsystem::{
         memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
@@ -60,10 +58,7 @@ pub const LOCAL_APIC_TIMER_PERIODIC: u32 = 1 << 17;
 pub static TRAMPOLINE_CODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/trampoline"));
 pub static mut AP_STARTUP_SPINLOCK: RwLock<u8> = RwLock::new(0);
 
-pub unsafe extern "C" fn ap_start(apic_processor_id: u64, kernel_ptr: *const Kernel) -> ! {
-    // @TODO: Move to perform_arch_initialization()
-    let kernel = Arc::from_raw(kernel_ptr);
-
+pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Kernel) -> ! {
     IDT.load();
     Cr4::write(Cr4::read() | Cr4Flags::FSGSBASE);
 
@@ -77,12 +72,12 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, kernel_ptr: *const Ker
     );
 
     ProcessorControlBlock::create_pcb_for_current_processor(apic_processor_id as u16);
-    let pcb = ProcessorControlBlock::get_pcb_for_current_processor();
-    let local_apic = LocalApic::initialize_for_current_processor(kernel);
+    let pcb = ProcessorControlBlock::current();
+    let local_apic = LocalApic::initialize_for_current_processor();
 
-    _ = (*pcb).local_apic.set(local_apic);
+    _ = pcb.local_apic.set(local_apic);
 
-    let processor_index = unsafe { (*pcb).apic_processor_id }; // NOTE: APIC Processor ID's behavior isn't guaranteed but seems to always work this way in practice
+    let processor_index = pcb.apic_processor_id; // NOTE: APIC Processor ID's behavior isn't guaranteed but seems to always work this way in practice
 
     let interrupt_stack =
         alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack;
@@ -115,11 +110,10 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, kernel_ptr: *const Ker
 
 pub struct LocalApic {
     local_apic_base: u64,
-    kernel: Arc<Kernel>,
 }
 
 impl LocalApic {
-    pub fn initialize_for_current_processor(kernel: Arc<Kernel>) -> LocalApic {
+    pub fn initialize_for_current_processor() -> LocalApic {
         let apic_base =
             unsafe { x86_64::registers::model_specific::Msr::new(IA32_APIC_BASE_MSR).read() };
         let local_apic_base = apic_base & APIC_BASE_MSR_APIC_BASE_FIELD_MASK;
@@ -143,10 +137,7 @@ impl LocalApic {
             }
         }
 
-        let apic = LocalApic {
-            local_apic_base,
-            kernel,
-        };
+        let apic = LocalApic { local_apic_base };
 
         // Enable Local APIC
         //
@@ -169,9 +160,11 @@ impl LocalApic {
     }
 
     pub fn enable_timer(&self) {
+        let kernel = kernel_ref();
+
         // Fire timer every 10ms
-        let ticks_per_10ms = self.kernel.apic.read().local_apic_timer_ticks_per_second / 100;
-        self.kernel.apic.write().ms_per_tick = 10;
+        let ticks_per_10ms = kernel.apic().read().local_apic_timer_ticks_per_second / 100;
+        kernel.apic().write().ms_per_tick = 10;
 
         // Enable interrupts
         self.write_register(LOCAL_APIC_TASK_PRIORITY_REGISTER, 0);
@@ -181,7 +174,7 @@ impl LocalApic {
 
         self.write_register(
             LOCAL_APIC_LVT_TIMER_REGISTER,
-            self.kernel.timer_irq as u32 | LOCAL_APIC_TIMER_PERIODIC,
+            kernel.timer_irq() as u32 | LOCAL_APIC_TIMER_PERIODIC,
         );
 
         // Start the timer
@@ -215,11 +208,14 @@ impl LocalApic {
         self.write_register(LOCAL_APIC_INITIAL_COUNT_REGISTER, 0xFFFFFFFF);
 
         // Perform PIT-assisted sleep for 1 second
-        unsafe { PIT.wait_seconds(1) };
+        kernel_ref().pit().read().wait_seconds(1);
 
         let ticks_per_second = 0xFFFFFFFF - self.read_register(LOCAL_APIC_CURRENT_COUNT_REGISTER);
 
-        self.kernel.apic.write().local_apic_timer_ticks_per_second = ticks_per_second as u64;
+        kernel_ref()
+            .apic()
+            .write()
+            .local_apic_timer_ticks_per_second = ticks_per_second as u64;
     }
 
     pub(crate) fn read_register(&self, register: u32) -> u32 {
@@ -353,20 +349,18 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
     scheduler::run(registers);
 
-    use_kernel_page_table(|| unsafe {
+    use_kernel_page_table(|| {
         let kernel = kernel_ref();
 
         // Check if the timer bit is set in LAPIC's In-Service Register (ISR).
         // True IRQs set this bit; manual calls (yield) do not.
-        let is_hw_interrupt = (*ProcessorControlBlock::get_pcb_for_current_processor())
-            .local_apic
-            .get()
-            .unwrap()
-            .is_isr(kernel.timer_irq);
+        let is_hw_interrupt = ProcessorControlBlock::current()
+            .local_apic()
+            .is_isr(kernel.timer_irq());
 
         if is_hw_interrupt {
             // Increment internal tick counter only on bootstrap processor
-            if (*ProcessorControlBlock::get_pcb_for_current_processor()).is_bsp {
+            if ProcessorControlBlock::current().is_bsp {
                 // Only increment system time on actual hardware clock ticks.
                 let current_tick_count = kernel.ticks.fetch_add(1, Ordering::SeqCst);
 
@@ -389,10 +383,8 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
 
             // EOI is mandatory for hardware IRQs to allow further interrupts,
             // but must be avoided for software-triggered calls.
-            (*ProcessorControlBlock::get_pcb_for_current_processor())
-                .local_apic
-                .get()
-                .unwrap()
+            (*ProcessorControlBlock::current())
+                .local_apic()
                 .signal_end_of_interrupt();
         }
     });

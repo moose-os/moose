@@ -18,7 +18,7 @@ use crate::{
         apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode},
         pci::PciDevice,
     },
-    kernel::Kernel,
+    kernel::kernel_ref,
     subsystem::memory::{
         memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE,
     },
@@ -43,7 +43,7 @@ pub struct Rtl8139 {
 }
 
 impl Rtl8139 {
-    pub fn new(pci_device: Arc<Mutex<PciDevice>>, kernel: Arc<Kernel>) -> Rtl8139 {
+    pub fn new(pci_device: Arc<Mutex<PciDevice>>) -> Rtl8139 {
         let mut memory_manager = memory_manager().write();
 
         // We use 64kb ring buffer for RX buffer and want to map first page after the last one,
@@ -91,7 +91,6 @@ impl Rtl8139 {
                 io_base: (bar0 & !0x3) as u16,
                 rx_buffer: frames[0].address().as_u64() as *mut u8,
                 current_rx_offset: 0,
-                kernel,
                 current_tx_index: 0,
             })),
         }
@@ -123,8 +122,7 @@ impl Rtl8139 {
                 // This is weird actually, because it should be totally random when using APIC + IRQ sharing, but in QEMU
                 // for some reason it works.
                 let interrupt_line = pci_device.get_interrupt_line();
-                let irq = rtl8139
-                    .kernel
+                let irq = kernel_ref()
                     .irq_allocator
                     .lock()
                     .allocate_irq(IrqLevel::NetworkInterfaceCard);
@@ -154,9 +152,8 @@ impl Rtl8139 {
                     .with_pin_polarity(PinPolarity::ActiveHigh)
                     .with_trigger_mode(TriggerMode::Edge);
 
-                rtl8139
-                    .kernel
-                    .apic
+                kernel_ref()
+                    .apic()
                     .read()
                     .redirect_interrupt(redirection_entry, interrupt_line);
             }
@@ -285,7 +282,6 @@ struct Rtl8139Inner {
     rx_buffer: *mut u8,
     current_rx_offset: usize,
     current_tx_index: usize,
-    kernel: Arc<Kernel>,
 }
 
 impl Rtl8139Inner {
@@ -374,11 +370,7 @@ fn handle_rtl8139_interrupt(nic: &mut Rtl8139Inner) {
     // This also allows RTL8139 to overwrite our data, so from this moment we can't rely on rx buffer
     outw(nic.io_base + INTERRUPT_STATUS_REGISTER, status);
 
-    unsafe {
-        _ = &(*ProcessorControlBlock::get_pcb_for_current_processor())
-            .local_apic
-            .get()
-            .unwrap()
-            .signal_end_of_interrupt();
-    }
+    ProcessorControlBlock::current()
+        .local_apic()
+        .signal_end_of_interrupt();
 }

@@ -1,5 +1,6 @@
 use alloc::{sync::Arc, vec::Vec};
 use core::{
+    alloc::Layout,
     ffi::c_void,
     sync::atomic::{AtomicBool, AtomicUsize},
 };
@@ -94,7 +95,7 @@ impl Thread {
 
     pub fn sleep(&self, time_in_ms: usize) {
         // Need to convert relative time in miliseconds to absolute kernel tick count
-        let sleep_time_in_ticks = time_in_ms as u64 / kernel_ref().apic.read().ms_per_tick;
+        let sleep_time_in_ticks = time_in_ms as u64 / kernel_ref().apic().read().ms_per_tick;
         let expiration_time = kernel_ref()
             .ticks
             .load(core::sync::atomic::Ordering::SeqCst)
@@ -158,8 +159,13 @@ pub enum Status {
 pub(crate) struct ThreadStack([u8; 16 * 1024]);
 
 impl ThreadStack {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self([0; 16 * 1024])
+    }
+
+    #[inline]
+    pub unsafe fn allocate() -> *mut ThreadStack {
+        (unsafe { alloc::alloc::alloc_zeroed(Layout::new::<ThreadStack>()) }) as *mut ThreadStack
     }
 }
 

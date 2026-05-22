@@ -9,7 +9,8 @@ use crate::{
         asm::outb,
         idt::{register_interrupt_handler, ExceptionFrame},
     },
-    driver::pic::{PIC, PIC_1_OFFSET},
+    driver::pic::PIC_1_OFFSET,
+    kernel::kernel_ref,
 };
 
 // CPU Timer
@@ -22,8 +23,6 @@ const CHANNEL1_DATA_PORT: u16 = 0x41;
 const CHANNEL2_DATA_PORT: u16 = 0x42;
 const COMMAND_REGISTER: u16 = 0x43;
 const PIT_TIMER: u8 = PIC_1_OFFSET;
-
-pub static mut PIT: ProgrammableIntervalTimer = ProgrammableIntervalTimer::new();
 
 pub struct ProgrammableIntervalTimer {
     ticks: RwLock<u32>,
@@ -82,14 +81,15 @@ impl ProgrammableIntervalTimer {
         self.initialized = true;
     }
 
-    pub fn wait_seconds(&mut self, seconds: u16) {
+    //pub fn wait_seconds(&mut self, seconds: u16) {
+    pub fn wait_seconds(&self, seconds: u16) {
         if !self.initialized {
             panic!("PIT not initialized!");
         }
 
         *self.ticks.write() = 0;
 
-        unsafe { PIC.unmask_interrupt(0) };
+        kernel_ref().pic().lock().unmask_interrupt(0);
 
         // Spinlock :(
         loop {
@@ -100,18 +100,19 @@ impl ProgrammableIntervalTimer {
             unsafe { asm!("hlt") };
         }
 
-        unsafe { PIC.mask_interrupt(0) };
+        kernel_ref().pic().lock().mask_interrupt(0);
     }
 
     // @TODO: Refactor
-    pub fn wait_sixteen_millis(&mut self) {
+    //pub fn wait_sixteen_millis(&mut self) {
+    pub fn wait_sixteen_millis(&self) {
         if !self.initialized {
             panic!("PIT not initialized!");
         }
 
         *self.ticks.write() = 0;
 
-        unsafe { PIC.unmask_interrupt(0) };
+        kernel_ref().pic().lock().unmask_interrupt(0);
 
         // Spinlock :(
         loop {
@@ -122,15 +123,17 @@ impl ProgrammableIntervalTimer {
             unsafe { asm!("hlt") };
         }
 
-        unsafe { PIC.mask_interrupt(0) };
+        kernel_ref().pic().lock().mask_interrupt(0);
     }
 
-    fn interrupt_handler(&mut self) {
+    //fn interrupt_handler(&mut self) {
+    fn interrupt_handler(&self) {
         *self.ticks.write() += 1;
     }
 }
 
 fn pit_interrupt_handler(_frame: &ExceptionFrame) {
-    unsafe { PIT.interrupt_handler() }
+    kernel_ref().pit().read().interrupt_handler();
+
     outb(0x20, 0x20);
 }

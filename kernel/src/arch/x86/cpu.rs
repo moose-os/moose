@@ -26,8 +26,7 @@ impl ProcessorControlBlock {
 
         GS::write_base(VirtAddr::new(ptr as *mut _ as u64));
 
-        (*ProcessorControlBlock::get_pcb_for_current_processor()).apic_processor_id =
-            apic_processor_id;
+        ProcessorControlBlock::current().apic_processor_id = apic_processor_id;
     }
 
     // @TODO: SWAPGS
@@ -37,7 +36,13 @@ impl ProcessorControlBlock {
     //   - if current processor is AP, just after jump from assembly code to kernel's initialization
     //     routine,
     // so GS will be properly initialized nearly always, and it's safe function.
-    pub fn get_pcb_for_current_processor() -> *mut ProcessorControlBlock {
-        GS::read_base().as_u64() as *mut ProcessorControlBlock
+    pub fn current() -> &'static mut ProcessorControlBlock {
+        unsafe { &mut *(GS::read_base().as_u64() as *mut ProcessorControlBlock) }
+    }
+
+    pub fn local_apic(&self) -> &LocalApic {
+        self.local_apic
+            .get()
+            .expect("Tried to access local APIC before initialization")
     }
 }

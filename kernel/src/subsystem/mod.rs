@@ -1,4 +1,5 @@
 pub mod allocator;
+pub mod boot;
 pub mod linker;
 pub mod logger;
 pub mod memory;

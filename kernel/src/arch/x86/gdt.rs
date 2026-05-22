@@ -1,4 +1,4 @@
-use core::mem;
+use core::{arch::asm, mem, ptr::addr_of};
 
 use bitfield_struct::bitfield;
 use bitflags::bitflags;
@@ -328,4 +328,30 @@ pub(crate) struct TaskStateSegment {
     pub(crate) reserved5: u32,
     pub(crate) reserved6: u16,
     pub(crate) iopb: u16,
+}
+
+pub unsafe fn setup_gdt() {
+    for (index, tss_segment) in GDT.tss_segments.iter_mut().enumerate() {
+        *tss_segment = SystemSegmentDescriptor::new(
+            addr_of!(TSS) as u64 + (index * mem::size_of::<TaskStateSegment>()) as u64,
+            mem::size_of::<TaskStateSegment>() as u32,
+            SystemSegmentDescriptorAttributes::new()
+                .with_present(true)
+                .with_segment_type(SystemSegmentType::SixtyFourBitAvailableTaskStateSegment),
+            SegmentFlags::empty(),
+        );
+    }
+
+    GDT_DESCRIPTOR = GlobalDescriptorTableDescriptor::new(
+        mem::size_of::<GlobalDescriptorTable>() as u16 - 1,
+        addr_of!(GDT) as u64,
+    );
+}
+
+#[inline(always)]
+pub unsafe fn load_gdt() {
+    asm!(
+        "lgdt [{gdt}]",
+        gdt = in(reg) addr_of!(GDT_DESCRIPTOR) as u64,
+    );
 }

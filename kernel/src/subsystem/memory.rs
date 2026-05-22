@@ -5,32 +5,23 @@ use core::{
 };
 
 use bitflags::bitflags;
-use limine::{memory_map::EntryType, response::MemoryMapResponse};
+use limine::memory_map::{Entry, EntryType};
 use snafu::Snafu;
-use spin::{once::Once, RwLock};
+use spin::RwLock;
 use x86_64::instructions::tlb;
+
+use crate::kernel::kernel_ref;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const FRAME_SIZE: usize = 4096;
 
-static MEMORY_MANAGER: Once<RwLock<MemoryManager>> = Once::new();
-
-pub fn initialize_memory_manager(frame_allocator: FrameAllocator, physical_memory_offset: u64) {
-    MEMORY_MANAGER.call_once(|| {
-        RwLock::new(MemoryManager {
-            frame_allocator,
-            physical_memory_offset,
-        })
-    });
-}
-
 pub fn memory_manager() -> &'static RwLock<MemoryManager> {
-    MEMORY_MANAGER.get().unwrap()
+    kernel_ref().memory_manager()
 }
 
 pub struct MemoryManager {
-    frame_allocator: FrameAllocator,
-    physical_memory_offset: u64,
+    pub(crate) frame_allocator: FrameAllocator,
+    pub(crate) physical_memory_offset: u64,
 }
 
 impl MemoryManager {
@@ -1053,23 +1044,22 @@ impl MemoryManager {
 }
 
 pub struct FrameAllocator {
-    memory_map_response: &'static MemoryMapResponse,
+    memory_map_entries: &'static [&'static Entry],
     n: usize,
 }
 
 // TODO: Implement more advanced frame allocator
 impl FrameAllocator {
-    pub fn new(memory_map_response: &'static MemoryMapResponse) -> Self {
+    pub fn new(memory_map_entries: &'static [&'static Entry]) -> Self {
         Self {
-            memory_map_response,
+            memory_map_entries,
             n: 0,
         }
     }
 
     pub fn allocate(&mut self) -> Option<Frame> {
         let frame = self
-            .memory_map_response
-            .entries()
+            .memory_map_entries
             .iter()
             .filter(|entry| entry.entry_type == EntryType::USABLE)
             .map(|entry| entry.base..(entry.base + entry.length))

@@ -6,11 +6,15 @@ edition = "2021"
 [dependencies]
 common = { path = "../common" }
 
-log = "0.4.27"
-snafu = { version = "0.8.5", default-features = false, features = ["rust_1_81"] }
+thiserror = { version = "2.0.18", default-features = false }
+static_assertions = "1.1.0"
 
 bitfield-struct = "0.10.1"
 bitflags = "2.9.0"
+
+log = "0.4.27"
+
+snafu = { version = "0.8.5", default-features = false, features = ["rust_1_81"] }
 
 spin = "0.10.0"
 

@@ -63,13 +63,19 @@ pub struct Serial {
     port: u16,
 }
 
-impl core::fmt::Write for Serial {
-    fn write_str(&mut self, string: &str) -> core::fmt::Result {
+impl Serial {
+    pub fn output(&mut self, string: &str) {
         for byte in string.bytes() {
             while inb(self.port + 5) & 0x20 == 0 {}
 
             outb(self.port, byte);
         }
+    }
+}
+
+impl core::fmt::Write for Serial {
+    fn write_str(&mut self, string: &str) -> core::fmt::Result {
+        self.output(string);
 
         Ok(())
     }
