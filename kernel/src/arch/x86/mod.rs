@@ -3,7 +3,10 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 
-use core::arch::{self, asm};
+use core::{
+    alloc::Layout,
+    arch::{self, asm},
+};
 
 use x86_64::{
     instructions::tlb,
@@ -93,4 +96,15 @@ pub fn read_rsp() -> u64 {
     }
 
     rsp
+}
+
+#[repr(C)]
+#[repr(align(4096))]
+pub struct InterruptStack([u8; 16 * 1024]);
+
+impl InterruptStack {
+    #[inline]
+    pub unsafe fn allocate() -> *mut InterruptStack {
+        alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack
+    }
 }

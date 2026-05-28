@@ -18,7 +18,7 @@ mod kernel;
 mod panic;
 mod subsystem;
 
-use core::{alloc::Layout, arch::asm, mem, ptr::NonNull};
+use core::ptr::NonNull;
 
 use raw_cpuid::CpuId;
 
@@ -26,7 +26,7 @@ use crate::{
     arch::x86::{
         cpu::ProcessorControlBlock,
         disable_interrupts, enable_interrupts,
-        gdt::{TSS, TSS_INDEX},
+        gdt::{load_tss, setup_tss},
         read_rsp,
     },
     driver::{acpi::initialize_acpica, apic::LocalApic},
@@ -67,9 +67,8 @@ unsafe extern "C" fn _start() -> ! {
 
     kernel.initialize_memory();
 
-    let interrupt_stack = InterruptStack::allocate();
-
-    setup_tss(interrupt_stack);
+    setup_tss(0);
+    load_tss(0);
 
     kernel.retrieve_gdt();
 
@@ -128,13 +127,15 @@ unsafe extern "C" fn _start() -> ! {
         .read()
         .setup_other_processors(pcb.local_apic());
 
-    info!("Scheduling");
+    info!("Spawning test processes...");
 
-    spawn_test_processes(interrupt_stack);
+    spawn_test_processes();
 
     enable_interrupts();
 
     pcb.local_apic().enable_timer();
+
+    info!("Scheduling...");
 
     Scheduler::run();
 }
@@ -155,41 +156,16 @@ unsafe fn map_kernel_page_table(kernel_page_table_physical_address: u64) -> NonN
     NonNull::new(page_table_virtual_address.as_mut_ptr()).expect("...")
 }
 
-unsafe fn setup_tss(interrupt_stack: *mut InterruptStack) {
-    TSS[0].rsp0 = interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
-    TSS[0].rsp1 = 0;
-    TSS[0].rsp2 = 0;
-
-    asm!(
-        "
-        ltr {segment:x}
-    ",
-        segment = in(reg_abcd) ((TSS_INDEX << 3) | 3) as u16,
-        options(nostack, nomem)
-    );
-}
-
-fn spawn_test_processes(interrupt_stack: *mut InterruptStack) {
+fn spawn_test_processes() {
     static PROGRAM_1: &[u8] = include_bytes!("../../program1/target/x86_64-moose/release/program1");
     static PROGRAM_2: &[u8] = include_bytes!("../../program2/target/x86_64-moose/release/program2");
 
     let kernel = kernel_ref();
 
     kernel
-        .spawn_process(PROGRAM_1, interrupt_stack, DEFAULT_THREAD_PRIORITY)
+        .spawn_process(PROGRAM_1, DEFAULT_THREAD_PRIORITY)
         .unwrap();
     kernel
-        .spawn_process(PROGRAM_2, interrupt_stack, DEFAULT_THREAD_PRIORITY)
+        .spawn_process(PROGRAM_2, DEFAULT_THREAD_PRIORITY)
         .unwrap();
-}
-
-#[repr(C)]
-#[repr(align(4096))]
-pub struct InterruptStack([u8; 16 * 1024]);
-
-impl InterruptStack {
-    #[inline]
-    pub unsafe fn allocate() -> *mut InterruptStack {
-        alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack
-    }
 }

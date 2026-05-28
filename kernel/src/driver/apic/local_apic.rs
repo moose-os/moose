@@ -1,8 +1,7 @@
 use core::{
-    alloc::Layout,
     arch::{asm, naked_asm},
     mem::{self, offset_of},
-    ptr::{self, addr_of},
+    ptr,
     sync::atomic::Ordering,
 };
 
@@ -12,7 +11,8 @@ use x86_64::registers::control::{Cr4, Cr4Flags};
 use crate::{
     arch::x86::{
         cpu::ProcessorControlBlock,
-        gdt::{GDT_DESCRIPTOR, TSS},
+        disable_interrupts, enable_interrupts,
+        gdt::{load_gdt, load_tss, setup_tss},
         idt::IDT,
         use_kernel_page_table,
     },
@@ -22,7 +22,6 @@ use crate::{
         process::{Registers, Status},
         scheduler::{self, TIMEOUT_QUEUE},
     },
-    InterruptStack,
 };
 
 pub const LOCAL_APIC_LAPIC_ID_REGISTER: u32 = 0x20;
@@ -62,14 +61,8 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Ke
     IDT.lock().load();
     Cr4::write(Cr4::read() | Cr4Flags::FSGSBASE);
 
-    asm!(
-        "
-            cli
-            lgdt [{gdt}]
-        ",
-        options(nomem, nostack),
-        gdt = in(reg) addr_of!(GDT_DESCRIPTOR) as u64,
-    );
+    disable_interrupts();
+    load_gdt();
 
     ProcessorControlBlock::create_pcb_for_current_processor(apic_processor_id as u16);
     let pcb = ProcessorControlBlock::current();
@@ -79,23 +72,12 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Ke
 
     let processor_index = pcb.apic_processor_id; // NOTE: APIC Processor ID's behavior isn't guaranteed but seems to always work this way in practice
 
-    let interrupt_stack =
-        alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack;
+    unsafe {
+        setup_tss(processor_index);
+        load_tss(processor_index);
+    }
 
-    TSS[processor_index as usize].rsp0 =
-        interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
-    TSS[processor_index as usize].rsp1 =
-        interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
-    TSS[processor_index as usize].rsp2 =
-        interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
-
-    asm!(
-        "ltr {segment_selector:x}",
-        options(nomem, nostack, preserves_flags),
-        segment_selector = in(reg) (((9 + (processor_index * 2)) << 3) | 3)
-    );
-
-    asm!("sti", options(nomem, nostack));
+    enable_interrupts();
 
     info!("Processor {} has started", processor_index);
 

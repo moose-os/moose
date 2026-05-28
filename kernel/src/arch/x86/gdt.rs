@@ -1,14 +1,20 @@
-use core::{arch::asm, mem, ptr::addr_of};
+use core::{alloc::Layout, arch::asm, mem, ptr::addr_of};
 
 use bitfield_struct::bitfield;
 use bitflags::bitflags;
+use spin::{Mutex, Once};
 
-use crate::arch::x86::cpu::MAXIMUM_CPU_CORES;
+use crate::arch::x86::{cpu::MAXIMUM_CPU_CORES, InterruptStack};
 
-pub(crate) static mut GDT_DESCRIPTOR: GlobalDescriptorTableDescriptor =
-    GlobalDescriptorTableDescriptor::new(0, 0); // We can't obtain the address of GDT at compile-time, so we have to initialize this in _start
-pub(crate) static mut GDT: GlobalDescriptorTable = GlobalDescriptorTable::new(); // We can't obtain the address of TSS at compile-time, so we have to initialize it in _start
-pub(crate) static mut TSS: [TaskStateSegment; MAXIMUM_CPU_CORES] = {
+pub(crate) const KERNEL_MODE_CODE_SEGMENT_INDEX: usize = 5;
+pub(crate) const KERNEL_MODE_DATA_SEGMENT_INDEX: usize = 6;
+pub(crate) const USER_MODE_CODE_SEGMENT_INDEX: usize = 7;
+pub(crate) const USER_MODE_DATA_SEGMENT_INDEX: usize = 8;
+pub(crate) const TSS_INDEX: usize = 9;
+
+pub(crate) static GDT_DESCRIPTOR: Once<GlobalDescriptorTableDescriptor> = Once::new();
+pub(crate) static GDT: Once<GlobalDescriptorTable> = Once::new();
+pub(crate) static TSS: Mutex<[TaskStateSegment; MAXIMUM_CPU_CORES]> = Mutex::new({
     const DEFAULT: TaskStateSegment = TaskStateSegment {
         reserved1: 0,
         rsp0: 0,
@@ -27,42 +33,101 @@ pub(crate) static mut TSS: [TaskStateSegment; MAXIMUM_CPU_CORES] = {
         reserved5: 0,
         reserved6: 0,
         iopb: mem::size_of::<TaskStateSegment>() as u16,
-    }; // We have to allocate stacks first, thus we need to initialize rsps in _start
+    };
 
     [DEFAULT; MAXIMUM_CPU_CORES]
-};
+});
 
-pub(crate) const KERNEL_MODE_CODE_SEGMENT_INDEX: usize = 5;
-pub(crate) const KERNEL_MODE_DATA_SEGMENT_INDEX: usize = 6;
-pub(crate) const USER_MODE_CODE_SEGMENT_INDEX: usize = 7;
-pub(crate) const USER_MODE_DATA_SEGMENT_INDEX: usize = 8;
-pub(crate) const TSS_INDEX: usize = 9;
+pub unsafe fn setup_gdt() {
+    GDT.call_once(|| {
+        let mut gdt = GlobalDescriptorTable::new();
+
+        for (index, tss_segment) in gdt.tss_segments.iter_mut().enumerate() {
+            *tss_segment = SystemSegmentDescriptor::new(
+                (TSS.lock().as_ptr()).add(index) as u64,
+                mem::size_of::<TaskStateSegment>() as u32,
+                SystemSegmentDescriptorAttributes::new()
+                    .with_present(true)
+                    .with_segment_type(SystemSegmentType::SixtyFourBitAvailableTaskStateSegment),
+                SegmentFlags::empty(),
+            );
+        }
+
+        gdt
+    });
+
+    GDT_DESCRIPTOR.call_once(|| {
+        GlobalDescriptorTableDescriptor::new(
+            mem::size_of::<GlobalDescriptorTable>() as u16 - 1,
+            GDT.as_mut_ptr(),
+        )
+    });
+}
+
+#[inline(always)]
+pub unsafe fn load_gdt() {
+    asm!(
+        "lgdt [{gdt}]",
+        gdt = in(reg) addr_of!(GDT_DESCRIPTOR) as u64,
+    );
+}
+
+pub unsafe fn setup_tss(processor_index: u16) {
+    let mut tss = TSS.lock();
+
+    let interrupt_stack =
+        alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack;
+
+    tss[processor_index as usize].rsp0 =
+        interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
+    tss[processor_index as usize].rsp1 = 0;
+    tss[processor_index as usize].rsp2 = 0;
+}
+
+#[inline(always)]
+pub unsafe fn load_tss(processor_index: u16) {
+    asm!(
+        "
+        ltr {segment:x}
+    ",
+        segment = in(reg_abcd) (((9 + (processor_index * 2)) << 3) | 3),
+        options(nostack, nomem)
+    );
+}
 
 // See Intel Manuals Combined, Volume C, 3.5.1, p. 3087, Fig. 3-11 for details
 #[repr(C, packed)]
 pub(crate) struct GlobalDescriptorTableDescriptor {
-    pub(crate) size: u16,
-    pub(crate) offset: u64,
+    size: u16,
+    addr: *const GlobalDescriptorTable,
 }
 
+// Safety: The raw pointer inside this descriptor points to a statically allocated GDT.
+//         It does not point to thread-local data, making it safe to move across thread boundaries.
+unsafe impl Send for GlobalDescriptorTableDescriptor {}
+
+// Safety: `addr` is only ever going to be accessed by the CPU,
+//         making it safe to share references to this structure across threads.
+unsafe impl Sync for GlobalDescriptorTableDescriptor {}
+
 impl GlobalDescriptorTableDescriptor {
-    pub(crate) const fn new(size: u16, offset: u64) -> Self {
-        Self { size, offset }
+    pub(crate) const fn new(size: u16, addr: *const GlobalDescriptorTable) -> Self {
+        Self { size, addr }
     }
 }
 
 #[repr(C, packed)]
 pub(crate) struct GlobalDescriptorTable {
-    pub(crate) null_entry: SegmentDescriptor,
-    pub(crate) kernel_mode_sixteen_bit_code_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
-    pub(crate) kernel_mode_sixteen_bit_data_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
-    pub(crate) kernel_mode_thirty_two_bit_code_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
-    pub(crate) kernel_mode_thirty_two_bit_data_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
-    pub(crate) kernel_mode_sixty_four_code_segment: SegmentDescriptor,
-    pub(crate) kernel_mode_sixty_four_data_segment: SegmentDescriptor,
-    pub(crate) user_mode_sixty_four_code_segment: SegmentDescriptor,
-    pub(crate) user_mode_sixty_four_data_segment: SegmentDescriptor,
-    pub(crate) tss_segments: [SystemSegmentDescriptor; MAXIMUM_CPU_CORES],
+    null_entry: SegmentDescriptor,
+    kernel_mode_sixteen_bit_code_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
+    kernel_mode_sixteen_bit_data_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
+    kernel_mode_thirty_two_bit_code_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
+    kernel_mode_thirty_two_bit_data_segment: SegmentDescriptor, // TODO: Unused, present for compatibility with Limine, see whether this can be removed
+    kernel_mode_sixty_four_code_segment: SegmentDescriptor,
+    kernel_mode_sixty_four_data_segment: SegmentDescriptor,
+    user_mode_sixty_four_code_segment: SegmentDescriptor,
+    user_mode_sixty_four_data_segment: SegmentDescriptor,
+    tss_segments: [SystemSegmentDescriptor; MAXIMUM_CPU_CORES],
 }
 
 impl GlobalDescriptorTable {
@@ -130,12 +195,12 @@ impl GlobalDescriptorTable {
 #[derive(Clone, Copy, Default)]
 #[repr(C, packed)]
 pub(crate) struct SegmentDescriptor {
-    pub(crate) limit_low: u16,
-    pub(crate) base_low: u16,
-    pub(crate) base_mid: u8,
-    pub(crate) attributes: u8,
-    pub(crate) flags_and_limit_high: u8,
-    pub(crate) base_high: u8,
+    limit_low: u16,
+    base_low: u16,
+    base_mid: u8,
+    attributes: u8,
+    flags_and_limit_high: u8,
+    base_high: u8,
 }
 
 impl SegmentDescriptor {
@@ -187,27 +252,27 @@ impl SegmentDescriptor {
 // See Intel Manuals Combined, Volume C, 3.4.5, p. 3081 for details
 #[bitfield(u8)]
 pub(crate) struct SegmentDescriptorAttributes {
-    pub(crate) accessed: bool,
-    pub(crate) readable_or_writable: bool,
-    pub(crate) direction_or_conforming: bool,
-    pub(crate) executable: bool,
-    pub(crate) descriptor_type: bool,
+    accessed: bool,
+    readable_or_writable: bool,
+    direction_or_conforming: bool,
+    executable: bool,
+    descriptor_type: bool,
     #[bits(2)]
-    pub(crate) privilege_level: u8,
-    pub(crate) present: bool,
+    privilege_level: u8,
+    present: bool,
 }
 
 // See Intel Manuals Combined, Volume C, 8.2.3, p. 3250, Fig. 8-4 for details
 #[repr(C, packed)]
 pub(crate) struct SystemSegmentDescriptor {
-    pub(crate) limit_low: u16,
-    pub(crate) base_low: u16,
-    pub(crate) base_mid: u8,
-    pub(crate) attributes: u8,
-    pub(crate) flags_and_limit_high: u8,
-    pub(crate) base_high: u8,
-    pub(crate) base_higher: u32,
-    pub(crate) reserved: u32,
+    limit_low: u16,
+    base_low: u16,
+    base_mid: u8,
+    attributes: u8,
+    flags_and_limit_high: u8,
+    base_high: u8,
+    base_higher: u32,
+    reserved: u32,
 }
 
 impl SystemSegmentDescriptor {
@@ -260,15 +325,15 @@ impl SystemSegmentDescriptor {
     }
 }
 
-// // See Intel Manuals Combined, Volume C, 3.4.5, p. 3081 for details
+// See Intel Manuals Combined, Volume C, 3.4.5, p. 3081 for details
 #[bitfield(u8)]
 pub(crate) struct SystemSegmentDescriptorAttributes {
     #[bits(4, default =  SystemSegmentType::LocalDescriptorTable)]
-    pub(crate) segment_type: SystemSegmentType,
-    pub(crate) _unused: bool,
+    segment_type: SystemSegmentType,
+    _unused: bool,
     #[bits(2)]
-    pub(crate) privilege_level: u8,
-    pub(crate) present: bool,
+    privilege_level: u8,
+    present: bool,
 }
 
 // See Intel Manuals Combined, Volume B, p. 1208, Table 3-66 for details
@@ -311,12 +376,12 @@ bitflags! {
 // See Intel Manuals Combined, Volume C, 8.7, p. 3263, Fig. 8-11 for details
 #[repr(C, packed)]
 pub(crate) struct TaskStateSegment {
-    pub(crate) reserved1: u32,
+    reserved1: u32,
     pub(crate) rsp0: u64,
     pub(crate) rsp1: u64,
     pub(crate) rsp2: u64,
-    pub(crate) reserved2: u32,
-    pub(crate) reserved3: u32,
+    reserved2: u32,
+    reserved3: u32,
     pub(crate) ist1: u64,
     pub(crate) ist2: u64,
     pub(crate) ist3: u64,
@@ -324,34 +389,8 @@ pub(crate) struct TaskStateSegment {
     pub(crate) ist5: u64,
     pub(crate) ist6: u64,
     pub(crate) ist7: u64,
-    pub(crate) reserved4: u32,
-    pub(crate) reserved5: u32,
-    pub(crate) reserved6: u16,
+    reserved4: u32,
+    reserved5: u32,
+    reserved6: u16,
     pub(crate) iopb: u16,
-}
-
-pub unsafe fn setup_gdt() {
-    for (index, tss_segment) in GDT.tss_segments.iter_mut().enumerate() {
-        *tss_segment = SystemSegmentDescriptor::new(
-            addr_of!(TSS) as u64 + (index * mem::size_of::<TaskStateSegment>()) as u64,
-            mem::size_of::<TaskStateSegment>() as u32,
-            SystemSegmentDescriptorAttributes::new()
-                .with_present(true)
-                .with_segment_type(SystemSegmentType::SixtyFourBitAvailableTaskStateSegment),
-            SegmentFlags::empty(),
-        );
-    }
-
-    GDT_DESCRIPTOR = GlobalDescriptorTableDescriptor::new(
-        mem::size_of::<GlobalDescriptorTable>() as u16 - 1,
-        addr_of!(GDT) as u64,
-    );
-}
-
-#[inline(always)]
-pub unsafe fn load_gdt() {
-    asm!(
-        "lgdt [{gdt}]",
-        gdt = in(reg) addr_of!(GDT_DESCRIPTOR) as u64,
-    );
 }

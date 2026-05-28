@@ -17,7 +17,10 @@ use x86_64::{
 };
 
 use crate::{
-    arch::irq::{IrqAllocator, IrqLevel},
+    arch::{
+        irq::{IrqAllocator, IrqLevel},
+        x86::{cpu::MAXIMUM_CPU_CORES, gdt::TSS, InterruptStack},
+    },
     driver::{
         acpi::{create_device_list, Acpi, Device},
         apic::Apic,
@@ -42,7 +45,6 @@ use crate::{
         scheduler,
         terminal::Terminal,
     },
-    InterruptStack,
 };
 
 static KERNEL: Kernel = Kernel::new();
@@ -263,19 +265,14 @@ impl Kernel {
     // | Process and thread management |
     // |-------------------------------|
 
-    pub fn spawn_process(
-        &self,
-        program: &[u8],
-        interrupt_stack: *mut InterruptStack,
-        priority: usize,
-    ) -> Result<Process, ()> {
+    pub fn spawn_process(&self, program: &[u8], priority: usize) -> Result<Process, ()> {
         if priority > HIGHEST_THREAD_PRIORITY {
             return Err(());
         }
 
         let stack = unsafe { ThreadStack::allocate() };
 
-        let mut program_page_table = self.create_address_space(self.bsp_stack(), interrupt_stack);
+        let mut program_page_table = self.create_address_space(self.bsp_stack());
 
         let mut memory_manager = memory_manager().write();
 
@@ -402,11 +399,7 @@ impl Kernel {
         Ok(thread)
     }
 
-    pub fn create_address_space(
-        &self,
-        kernel_stack: u64,
-        interrupt_stack: *mut InterruptStack,
-    ) -> Box<PageTable> {
+    pub fn create_address_space(&self, kernel_stack: u64) -> Box<PageTable> {
         let mut page_table = Box::new(PageTable::new());
 
         let kernel_virtual_base_address = self.boot_context().kernel_virtual_base_address;
@@ -458,31 +451,43 @@ impl Kernel {
 
         // remap interrupt's stack in program's address space
         {
-            for page_index in 0..4 {
-                let interrupt_stack_virtual_address =
-                    VirtualAddress::new(interrupt_stack as u64 + (page_index * 4096));
-                let interrupt_stack_physical_address = memory_manager
-                    .translate_virtual_address_to_physical_for_current_address_space(
-                        interrupt_stack_virtual_address,
-                    )
-                    .unwrap();
+            let tss = TSS.lock();
 
-                unsafe {
-                    memory_manager
-                        .unmap(
-                            &mut *page_table,
-                            &Page::new(interrupt_stack_virtual_address),
+            for processor_idx in 0..MAXIMUM_CPU_CORES {
+                if tss[processor_idx].rsp0 == 0 {
+                    continue;
+                }
+
+                let interrupt_stack = tss[processor_idx].rsp0 as *mut InterruptStack as u64
+                    - mem::size_of::<InterruptStack>() as u64
+                    + 16;
+
+                for page_index in 0..4 {
+                    let interrupt_stack_virtual_address =
+                        VirtualAddress::new(interrupt_stack as u64 + (page_index * 4096));
+                    let interrupt_stack_physical_address = memory_manager
+                        .translate_virtual_address_to_physical_for_current_address_space(
+                            interrupt_stack_virtual_address,
                         )
                         .unwrap();
 
-                    memory_manager
-                        .map(
-                            &mut *page_table,
-                            &Page::new(interrupt_stack_virtual_address),
-                            &Frame::new(interrupt_stack_physical_address),
-                            PageFlags::WRITABLE,
-                        )
-                        .unwrap();
+                    unsafe {
+                        memory_manager
+                            .unmap(
+                                &mut *page_table,
+                                &Page::new(interrupt_stack_virtual_address),
+                            )
+                            .unwrap();
+
+                        memory_manager
+                            .map(
+                                &mut *page_table,
+                                &Page::new(interrupt_stack_virtual_address),
+                                &Frame::new(interrupt_stack_physical_address),
+                                PageFlags::WRITABLE,
+                            )
+                            .unwrap();
+                    }
                 }
             }
         }
