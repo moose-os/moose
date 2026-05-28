@@ -354,7 +354,7 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
                     // we only need to inspect the head of the queue. If the first
                     // timer hasn't expired, no subsequent timers have either.
                     // This allows an O(1) check for most ticks and O(k) for k expired threads.
-                    while queue.front().map_or(false, |(expiration_tick_count, _)| {
+                    while queue.front().is_some_and(|(expiration_tick_count, _)| {
                         *expiration_tick_count <= current_tick_count
                     }) {
                         let (_, thread) = queue.pop_front().unwrap();

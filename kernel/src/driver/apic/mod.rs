@@ -116,7 +116,7 @@ impl Apic {
                     .as_u64(),
             );
             // Address of kernel's AP initialization routine
-            args.offset(1).write(ap_start as usize as u64);
+            args.offset(1).write(ap_start as *const () as u64);
             // Address of Kernel instance
             args.offset(2).write(kernel_ref() as *const _ as u64);
 

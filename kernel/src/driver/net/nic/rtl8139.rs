@@ -223,7 +223,7 @@ impl Rtl8139 {
     pub fn send_packet(&mut self, data: &[u8]) {
         // Safety checks
         assert!(data.len() < 1518);
-        assert!(data.len() > 0);
+        assert!(!data.is_empty());
 
         let (transmit_buffer, transmit_status) = self.get_current_transmit_registers();
         let io_base = self.inner.lock().io_base;
