@@ -9,26 +9,26 @@ common = { path = "../common" }
 thiserror = { version = "2.0.18", default-features = false }
 static_assertions = "1.1.0"
 
-bitfield-struct = "0.10.1"
-bitflags = "2.9.0"
+bitfield-struct = "0.13.0"
+bitflags = "2.12.1"
 
-log = "0.4.27"
+log = "0.4.31"
 
-snafu = { version = "0.8.5", default-features = false, features = ["rust_1_81"] }
+snafu = { version = "0.9.1", default-features = false, features = ["rust_1_81"] }
 
 spin = "0.10.0"
 
-phf = { version = "0.11.3", default-features = false, features = ["macros"] }
+phf = { version = "0.13.1", default-features = false, features = ["macros"] }
 
 deku = { version = "0.16.0", default-features = false, features = ["alloc", "const_generics"] }
-goblin = { version = "0.9.3", default-features = false, features = ["alloc", "elf32", "elf64", "endian_fd"] }
+goblin = { version = "0.10.7", default-features = false, features = ["alloc", "elf32", "elf64", "endian_fd"] }
 
-libm = { version = "0.2.11", default-features = false }
+libm = { version = "0.2.16", default-features = false }
 
-x86_64 = "0.15.2"
-raw-cpuid = "11.5.0"
+x86_64 = "0.15.4"
+raw-cpuid = "11.6.0"
 
-linked_list_allocator = "0.10.5"
+linked_list_allocator = "0.10.6"
 
 pic8259 = { version = "0.11.0", default-features = false }
 
