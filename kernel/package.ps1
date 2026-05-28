@@ -25,7 +25,7 @@ if (-not (Test-Path -Path iso_root)) {
 }
 
 if (-not (Test-Path -Path limine)) {
-    git clone https://github.com/limine-bootloader/limine.git --branch=v9.x-binary --depth=1
+    git clone https://github.com/limine-bootloader/limine.git --branch=v11.x-binary --depth=1
 
     Copy-Item limine/limine-bios.sys -Destination iso_root/boot/limine/
     Copy-Item limine/limine-bios-cd.bin -Destination iso_root/boot/limine/
