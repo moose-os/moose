@@ -5,7 +5,7 @@ use core::{
     sync::atomic::{AtomicBool, AtomicUsize},
 };
 
-use spin::{Mutex, MutexGuard};
+use spin::{Mutex, MutexGuard, Spin};
 
 use crate::{
     kernel::kernel_ref,
@@ -39,7 +39,7 @@ impl Process {
         self.0.id
     }
 
-    pub fn threads(&self) -> MutexGuard<'_, Vec<Thread>> {
+    pub fn threads(&self) -> MutexGuard<'_, Vec<Thread>, Spin> {
         self.0.threads.lock()
     }
 }

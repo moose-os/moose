@@ -16,7 +16,7 @@ log = "0.4.31"
 
 snafu = { version = "0.9.1", default-features = false, features = ["rust_1_81"] }
 
-spin = "0.10.0"
+spin = "0.12.0"
 
 phf = { version = "0.13.1", default-features = false, features = ["macros"] }
 
