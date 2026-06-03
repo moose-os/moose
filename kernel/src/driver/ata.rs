@@ -1,8 +1,11 @@
-use alloc::{borrow::ToOwned, format, string::String, sync::Arc, vec, vec::Vec};
+use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 use core::{cmp::min, mem::transmute};
 
-use deku::bitvec::{BitSlice, Msb0};
-use deku::{DekuError, DekuRead};
+use deku::{
+    no_std_io::{Read, Seek},
+    reader::Reader,
+    DekuError, DekuRead, DekuReader,
+};
 use spin::Mutex;
 
 use crate::{
@@ -445,7 +448,7 @@ impl Ata {
 struct AtaIdentityResponse {
     #[deku(
         pad_bytes_before = "52",
-        reader = "AtaIdentityResponse::read_model_number(deku::rest)"
+        reader = "AtaIdentityResponse::read_model_number(deku::reader)"
     )]
     _model_number: String,
     #[deku(pad_bytes_before = "6")]
@@ -455,20 +458,14 @@ struct AtaIdentityResponse {
 }
 
 impl AtaIdentityResponse {
-    fn read_model_number(
-        rest: &BitSlice<u8, Msb0>,
-    ) -> Result<(&BitSlice<u8, Msb0>, String), DekuError> {
+    fn read_model_number<R: Read + Seek>(reader: &mut Reader<R>) -> Result<String, DekuError> {
         let mut buffer = [0u8; 40];
-        let mut remaining_slice = rest;
 
         // ATA reports model number in some cringe format with swapped bytes, so we need to
         // "unswap" it to make it a "real" string
         for i in 0..20 {
-            let higher_byte;
-            let lower_byte;
-
-            (remaining_slice, higher_byte) = u8::read(remaining_slice, ())?;
-            (remaining_slice, lower_byte) = u8::read(remaining_slice, ())?;
+            let higher_byte = u8::from_reader_with_ctx(reader, ())?;
+            let lower_byte = u8::from_reader_with_ctx(reader, ())?;
 
             buffer[i * 2] = lower_byte;
             buffer[i * 2 + 1] = higher_byte;
@@ -479,6 +476,6 @@ impl AtaIdentityResponse {
             .trim_end()
             .to_owned();
 
-        Ok((remaining_slice, string))
+        Ok(string)
     }
 }

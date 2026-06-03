@@ -20,7 +20,7 @@ spin = "0.12.0"
 
 phf = { version = "0.13.1", default-features = false, features = ["macros"] }
 
-deku = { version = "0.16.0", default-features = false, features = ["alloc", "const_generics"] }
+deku = { version = "0.20.3", default-features = false, features = ["alloc"] }
 goblin = { version = "0.10.7", default-features = false, features = ["alloc", "elf32", "elf64", "endian_fd"] }
 
 libm = { version = "0.2.16", default-features = false }
