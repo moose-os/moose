@@ -194,10 +194,8 @@ impl Apic {
 
                 self.boot_processor(local_apic, entry.apic_id);
 
-                unsafe {
-                    while without_interrupts(|| *AP_STARTUP_SPINLOCK.read() == 0) {
-                        kernel_ref().pit().read().wait_sixteen_millis();
-                    }
+                while without_interrupts(|| *AP_STARTUP_SPINLOCK.read() == 0) {
+                    kernel_ref().pit().read().wait_sixteen_millis();
                 }
             });
     }

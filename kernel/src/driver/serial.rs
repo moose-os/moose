@@ -34,7 +34,7 @@ impl SerialPort {
         outb(port + 1, 0x00); // Disable all interrupts
 
         outb(port + 3, 0x80); // Enable DLAB (set baud rate divisor)
-        outb(port + 0, 0x03); // Set divisor to 3 (lo byte) 38400 baud
+        outb(port, 0x03); // Set divisor to 3 (lo byte) 38400 baud
         outb(port + 1, 0x00); //                  (hi byte)
         outb(port + 3, 0x03); // 8 bits, no parity, one stop bit
 
@@ -45,9 +45,9 @@ impl SerialPort {
         outb(port + 4, 0x1E); // Set in loopback mode, test the serial chip
 
         // Test serial chip (send byte 0xAE and check if serial returns same byte)
-        outb(port + 0, 0xAE);
+        outb(port, 0xAE);
 
-        if inb(port + 0) != 0xAE {
+        if inb(port) != 0xAE {
             return Err(());
         }
 

@@ -136,7 +136,7 @@ impl PciDevice {
         let lower_word = self.read(bar_offset);
         let higher_word = self.read(bar_offset + 2);
 
-        return (higher_word << 16) | lower_word;
+        (higher_word << 16) | lower_word
     }
 
     pub fn get_interrupt_pin(&self) -> u8 {
@@ -160,7 +160,7 @@ impl PciDevice {
             | 0x80000000;
         outl(CONFIG_ADDRESS, address);
 
-        return inl(CONFIG_DATA);
+        inl(CONFIG_DATA)
     }
 
     fn write(&self, offset: u32, value: u32) {
@@ -198,24 +198,24 @@ fn get_device_name(device: &PciDevice) -> &str {
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum PciDeviceClass {
-    Undefined(PciDeviceClassUndefinedSubclass),
-    MassStorageController(PciDeviceClassMassStorageControllerSubclass),
-    NetworkController(PciDeviceClassNetworkControllerSubclass),
-    DisplayController(PciDeviceClassDisplayControllerSubclass),
-    MultimediaDevice(PciDeviceClassMultimediaControllerSubclass),
-    MemoryController(PciDeviceClassMemoryControllerSubclass),
-    Bridge(PciDeviceClassBridgeSubclass),
-    SimpleCommunicationController(PciDeviceClassSimpleCommunicationControllerSubclass),
-    BaseSystemPeripheral(PciDeviceClassBaseSystemPeripheralSubclass),
-    InputDevice(PciDeviceClassInputDeviceControllerSubclass),
-    DockingStation(PciDeviceClassDockingStationSubclass),
-    Processor(PciDeviceClassProcessorSubclass),
-    SerialBusController(PciDeviceClassSerialBusControllerSubclass),
-    WirelessController(PciDeviceClassWirelessControllerSubclass),
-    IntelligentIoController(PciDeviceClassIntelligentControllerSubclass),
-    SatelliteCommunicationController(PciDeviceClassSatelliteCommunicationControllerSubclass),
-    EncryptionOrDecryptionController(PciDeviceClassEncryptionControllerSubclass),
-    DataAcquisitionAndSignalProcessingController(PciDeviceClassSignalProcessingControllerSubclass),
+    Undefined(UndefinedSubclass),
+    MassStorageController(MassStorageControllerSubclass),
+    NetworkController(NetworkControllerSubclass),
+    DisplayController(DisplayControllerSubclass),
+    MultimediaDevice(MultimediaControllerSubclass),
+    MemoryController(MemoryControllerSubclass),
+    Bridge(BridgeSubclass),
+    SimpleCommunicationController(SimpleCommunicationControllerSubclass),
+    BaseSystemPeripheral(BaseSystemPeripheralSubclass),
+    InputDevice(InputDeviceControllerSubclass),
+    DockingStation(DockingStationSubclass),
+    Processor(ProcessorSubclass),
+    SerialBusController(SerialBusControllerSubclass),
+    WirelessController(WirelessControllerSubclass),
+    IntelligentIoController(IntelligentControllerSubclass),
+    SatelliteCommunicationController(SatelliteCommunicationControllerSubclass),
+    EncryptionController(EncryptionControllerSubclass),
+    DataAcquisitionAndSignalProcessingController(SignalProcessingControllerSubclass),
     ProcessingAccelerator,
     NonEssentialInstrumentation,
     // Reserved
@@ -226,154 +226,156 @@ impl PciDeviceClass {
     pub fn parse(class_id: u32, subclass_id: u32) -> PciDeviceClass {
         match class_id {
             0x0 => PciDeviceClass::Undefined(match subclass_id {
-                0x0 => PciDeviceClassUndefinedSubclass::NonVgaCompatibleUnclassifiedDevice,
-                0x1 => PciDeviceClassUndefinedSubclass::VgaCompatibleUnclassifiedDevice,
+                0x0 => UndefinedSubclass::NonVgaCompatibleUnclassifiedDevice,
+                0x1 => UndefinedSubclass::VgaCompatibleUnclassifiedDevice,
                 _ => unreachable!(),
             }),
             0x1 => PciDeviceClass::MassStorageController(match subclass_id {
-                0x0 => PciDeviceClassMassStorageControllerSubclass::ScsiBusController,
-                0x1 => PciDeviceClassMassStorageControllerSubclass::IdeController,
-                0x2 => PciDeviceClassMassStorageControllerSubclass::FloppyDiskController,
-                0x3 => PciDeviceClassMassStorageControllerSubclass::IpiBusController,
-                0x4 => PciDeviceClassMassStorageControllerSubclass::RaidController,
-                0x5 => PciDeviceClassMassStorageControllerSubclass::AtaController,
-                0x6 => PciDeviceClassMassStorageControllerSubclass::SataController,
-                0x7 => PciDeviceClassMassStorageControllerSubclass::SerialAttachedScsiController,
-                0x8 => PciDeviceClassMassStorageControllerSubclass::NonVolatileMemoryController,
+                0x0 => MassStorageControllerSubclass::ScsiBus,
+                0x1 => MassStorageControllerSubclass::Ide,
+                0x2 => MassStorageControllerSubclass::FloppyDisk,
+                0x3 => MassStorageControllerSubclass::IpiBus,
+                0x4 => MassStorageControllerSubclass::Raid,
+                0x5 => MassStorageControllerSubclass::Ata,
+                0x6 => MassStorageControllerSubclass::Sata,
+                0x7 => MassStorageControllerSubclass::SerialAttachedScsi,
+                0x8 => MassStorageControllerSubclass::NonVolatileMemory,
                 _ => unreachable!(),
             }),
             0x2 => PciDeviceClass::NetworkController(match subclass_id {
-                0x0 => PciDeviceClassNetworkControllerSubclass::EthernetController,
-                0x1 => PciDeviceClassNetworkControllerSubclass::TokenRingController,
-                0x2 => PciDeviceClassNetworkControllerSubclass::FddiController,
-                0x3 => PciDeviceClassNetworkControllerSubclass::AtmController,
-                0x4 => PciDeviceClassNetworkControllerSubclass::IsdnController,
-                0x5 => PciDeviceClassNetworkControllerSubclass::WorldFipController,
-                0x6 => PciDeviceClassNetworkControllerSubclass::PicmgMultimComputingController,
-                0x7 => PciDeviceClassNetworkControllerSubclass::InfinibandController,
-                0x8 => PciDeviceClassNetworkControllerSubclass::FabricController,
+                0x0 => NetworkControllerSubclass::Ethernet,
+                0x1 => NetworkControllerSubclass::TokenRing,
+                0x2 => NetworkControllerSubclass::Fddi,
+                0x3 => NetworkControllerSubclass::Atm,
+                0x4 => NetworkControllerSubclass::Isdn,
+                0x5 => NetworkControllerSubclass::WorldFip,
+                0x6 => NetworkControllerSubclass::PicmgMultimComputing,
+                0x7 => NetworkControllerSubclass::Infiniband,
+                0x8 => NetworkControllerSubclass::Fabric,
                 _ => unreachable!(),
             }),
             0x3 => PciDeviceClass::DisplayController(match subclass_id {
-                0x0 => PciDeviceClassDisplayControllerSubclass::VgaCompatibleController,
-                0x1 => PciDeviceClassDisplayControllerSubclass::XgaController,
-                0x2 => PciDeviceClassDisplayControllerSubclass::NotVgaCompatible3dController,
+                0x0 => DisplayControllerSubclass::VgaCompatible,
+                0x1 => DisplayControllerSubclass::Xga,
+                0x2 => DisplayControllerSubclass::NotVgaCompatible3d,
                 _ => unreachable!(),
             }),
             0x4 => PciDeviceClass::MultimediaDevice(match subclass_id {
-                0x0 => PciDeviceClassMultimediaControllerSubclass::MultimediaVideoController,
-                0x1 => PciDeviceClassMultimediaControllerSubclass::MultimediaAudioController,
-                0x2 => PciDeviceClassMultimediaControllerSubclass::ComputerTelephonyDevice,
-                0x3 => PciDeviceClassMultimediaControllerSubclass::AudioDevice,
+                0x0 => MultimediaControllerSubclass::MultimediaVideo,
+                0x1 => MultimediaControllerSubclass::MultimediaAudio,
+                0x2 => MultimediaControllerSubclass::ComputerTelephonyDevice,
+                0x3 => MultimediaControllerSubclass::AudioDevice,
                 _ => unreachable!(),
             }),
             0x5 => PciDeviceClass::MemoryController(match subclass_id {
-                0x0 => PciDeviceClassMemoryControllerSubclass::RamController,
-                0x1 => PciDeviceClassMemoryControllerSubclass::FlashController,
+                0x0 => MemoryControllerSubclass::Ram,
+                0x1 => MemoryControllerSubclass::Flash,
                 _ => unreachable!(),
             }),
             0x6 => PciDeviceClass::Bridge(match subclass_id {
-                0x0 => PciDeviceClassBridgeSubclass::HostBridge,
-                0x1 => PciDeviceClassBridgeSubclass::IsaBridge,
-                0x2 => PciDeviceClassBridgeSubclass::EisaBridge,
-                0x3 => PciDeviceClassBridgeSubclass::McaBridge,
-                0x4 => PciDeviceClassBridgeSubclass::PciToPciBridge,
-                0x5 => PciDeviceClassBridgeSubclass::PcmciaBridge,
-                0x6 => PciDeviceClassBridgeSubclass::NuBusBridge,
-                0x7 => PciDeviceClassBridgeSubclass::CardBusBridge,
-                0x8 => PciDeviceClassBridgeSubclass::RaceWayBridge,
-                0x9 => PciDeviceClassBridgeSubclass::PciToPciBridge2,
-                0xA => PciDeviceClassBridgeSubclass::InfiniBandToPciHostBridge,
+                0x0 => BridgeSubclass::Host,
+                0x1 => BridgeSubclass::Isa,
+                0x2 => BridgeSubclass::Eisa,
+                0x3 => BridgeSubclass::Mca,
+                0x4 => BridgeSubclass::PciToPci,
+                0x5 => BridgeSubclass::Pcmcia,
+                0x6 => BridgeSubclass::NuBus,
+                0x7 => BridgeSubclass::CardBus,
+                0x8 => BridgeSubclass::RaceWay,
+                0x9 => BridgeSubclass::PciToPci2,
+                0xA => BridgeSubclass::InfiniBandToPciHost,
                 _ => unreachable!(),
             }),
             0x7 => PciDeviceClass::SimpleCommunicationController(match subclass_id {
-                0x0 => PciDeviceClassSimpleCommunicationControllerSubclass::SerialController,
-                0x1 => PciDeviceClassSimpleCommunicationControllerSubclass::ParallelController,
-                0x2 => PciDeviceClassSimpleCommunicationControllerSubclass::MultiportSerialController,
-                0x3 => PciDeviceClassSimpleCommunicationControllerSubclass::Modem,
-                0x4 => PciDeviceClassSimpleCommunicationControllerSubclass::GpibController,
-                0x5 => PciDeviceClassSimpleCommunicationControllerSubclass::SmartCardController,
+                0x0 => SimpleCommunicationControllerSubclass::Serial,
+                0x1 => SimpleCommunicationControllerSubclass::Parallel,
+                0x2 => SimpleCommunicationControllerSubclass::MultiportSerial,
+                0x3 => SimpleCommunicationControllerSubclass::Modem,
+                0x4 => SimpleCommunicationControllerSubclass::Gpib,
+                0x5 => SimpleCommunicationControllerSubclass::SmartCard,
                 _ => unreachable!(),
             }),
             0x8 => PciDeviceClass::BaseSystemPeripheral(match subclass_id {
-                0x0 => PciDeviceClassBaseSystemPeripheralSubclass::Pic,
-                0x1 => PciDeviceClassBaseSystemPeripheralSubclass::DmaController,
-                0x2 => PciDeviceClassBaseSystemPeripheralSubclass::Timer,
-                0x3 => PciDeviceClassBaseSystemPeripheralSubclass::RtcController,
-                0x4 => PciDeviceClassBaseSystemPeripheralSubclass::PciHotPlugController,
-                0x5 => PciDeviceClassBaseSystemPeripheralSubclass::SdHostController,
-                0x6 => PciDeviceClassBaseSystemPeripheralSubclass::IoMmu,
+                0x0 => BaseSystemPeripheralSubclass::Pic,
+                0x1 => BaseSystemPeripheralSubclass::DmaController,
+                0x2 => BaseSystemPeripheralSubclass::Timer,
+                0x3 => BaseSystemPeripheralSubclass::RtcController,
+                0x4 => BaseSystemPeripheralSubclass::PciHotPlugController,
+                0x5 => BaseSystemPeripheralSubclass::SdHostController,
+                0x6 => BaseSystemPeripheralSubclass::IoMmu,
                 _ => unreachable!(),
             }),
             0x9 => PciDeviceClass::InputDevice(match subclass_id {
-                0x0 => PciDeviceClassInputDeviceControllerSubclass::KeyboardController,
-                0x1 => PciDeviceClassInputDeviceControllerSubclass::DigitizerPen,
-                0x2 => PciDeviceClassInputDeviceControllerSubclass::MouseController,
-                0x3 => PciDeviceClassInputDeviceControllerSubclass::ScannerController,
-                0x4 => PciDeviceClassInputDeviceControllerSubclass::GameportController,
+                0x0 => InputDeviceControllerSubclass::Keyboard,
+                0x1 => InputDeviceControllerSubclass::DigitizerPen,
+                0x2 => InputDeviceControllerSubclass::Mouse,
+                0x3 => InputDeviceControllerSubclass::Scanner,
+                0x4 => InputDeviceControllerSubclass::Gameport,
                 _ => unreachable!(),
             }),
             0xA => PciDeviceClass::DockingStation(match subclass_id {
-                0x0 => PciDeviceClassDockingStationSubclass::Generic,
+                0x0 => DockingStationSubclass::Generic,
                 _ => unreachable!(),
             }),
             0xB => PciDeviceClass::Processor(match subclass_id {
-                0x0 => PciDeviceClassProcessorSubclass::x386,
-                0x1 => PciDeviceClassProcessorSubclass::x486,
-                0x2 => PciDeviceClassProcessorSubclass::Pentium,
-                0x3 => PciDeviceClassProcessorSubclass::PentiumPro,
-                0x10 => PciDeviceClassProcessorSubclass::Alpha,
-                0x20 => PciDeviceClassProcessorSubclass::PowerPc,
-                0x30 => PciDeviceClassProcessorSubclass::Mips,
-                0x40 => PciDeviceClassProcessorSubclass::CoProcessor,
+                0x0 => ProcessorSubclass::x386,
+                0x1 => ProcessorSubclass::x486,
+                0x2 => ProcessorSubclass::Pentium,
+                0x3 => ProcessorSubclass::PentiumPro,
+                0x10 => ProcessorSubclass::Alpha,
+                0x20 => ProcessorSubclass::PowerPc,
+                0x30 => ProcessorSubclass::Mips,
+                0x40 => ProcessorSubclass::CoProcessor,
                 _ => unreachable!(),
             }),
             0xC => PciDeviceClass::SerialBusController(match subclass_id {
-                0x0 => PciDeviceClassSerialBusControllerSubclass::FireWireController,
-                0x1 => PciDeviceClassSerialBusControllerSubclass::AccessBusController,
-                0x2 => PciDeviceClassSerialBusControllerSubclass::Ssa,
-                0x3 => PciDeviceClassSerialBusControllerSubclass::UsbController,
-                0x4 => PciDeviceClassSerialBusControllerSubclass::FibreChannel,
-                0x5 => PciDeviceClassSerialBusControllerSubclass::SmbusController,
-                0x6 => PciDeviceClassSerialBusControllerSubclass::InfiniBandController,
-                0x7 => PciDeviceClassSerialBusControllerSubclass::IpmiInterface,
-                0x8 => PciDeviceClassSerialBusControllerSubclass::SercosInterface,
-                0x9 => PciDeviceClassSerialBusControllerSubclass::CanbusController,
+                0x0 => SerialBusControllerSubclass::FireWire,
+                0x1 => SerialBusControllerSubclass::AccessBus,
+                0x2 => SerialBusControllerSubclass::Ssa,
+                0x3 => SerialBusControllerSubclass::UsbController,
+                0x4 => SerialBusControllerSubclass::FibreChannel,
+                0x5 => SerialBusControllerSubclass::SmbusController,
+                0x6 => SerialBusControllerSubclass::InfiniBand,
+                0x7 => SerialBusControllerSubclass::IpmiInterface,
+                0x8 => SerialBusControllerSubclass::SercosInterface,
+                0x9 => SerialBusControllerSubclass::Canbus,
                 _ => unreachable!(),
             }),
             0xD => PciDeviceClass::WirelessController(match subclass_id {
-                0x0 => PciDeviceClassWirelessControllerSubclass::IrdaCompatibleController,
-                0x1 => PciDeviceClassWirelessControllerSubclass::ConsumerIrController,
-                0x10 => PciDeviceClassWirelessControllerSubclass::RfController,
-                0x11 => PciDeviceClassWirelessControllerSubclass::BluetoothController,
-                0x12 => PciDeviceClassWirelessControllerSubclass::BroadbandController,
-                0x20 => PciDeviceClassWirelessControllerSubclass::EthernetControllerA,
-                0x21 => PciDeviceClassWirelessControllerSubclass::EthernetControllerB,
+                0x0 => WirelessControllerSubclass::IrdaCompatible,
+                0x1 => WirelessControllerSubclass::ConsumerIr,
+                0x10 => WirelessControllerSubclass::Rf,
+                0x11 => WirelessControllerSubclass::Bluetooth,
+                0x12 => WirelessControllerSubclass::Broadband,
+                0x20 => WirelessControllerSubclass::EthernetA,
+                0x21 => WirelessControllerSubclass::EthernetB,
                 _ => unreachable!(),
             }),
             0xE => PciDeviceClass::IntelligentIoController(match subclass_id {
-                0x0 => PciDeviceClassIntelligentControllerSubclass::I20,
+                0x0 => IntelligentControllerSubclass::I20,
                 _ => unreachable!(),
             }),
             0xF => PciDeviceClass::SatelliteCommunicationController(match subclass_id {
-                0x1 => PciDeviceClassSatelliteCommunicationControllerSubclass::SatelliteTvController,
-                0x2 => PciDeviceClassSatelliteCommunicationControllerSubclass::SatelliteAudioController,
-                0x3 => PciDeviceClassSatelliteCommunicationControllerSubclass::SatelliteVoiceController,
-                0x4 => PciDeviceClassSatelliteCommunicationControllerSubclass::SatelliteDataController,
+                0x1 => SatelliteCommunicationControllerSubclass::Tv,
+                0x2 => SatelliteCommunicationControllerSubclass::Audio,
+                0x3 => SatelliteCommunicationControllerSubclass::Voice,
+                0x4 => SatelliteCommunicationControllerSubclass::Data,
                 _ => unreachable!(),
             }),
-            0x10 => PciDeviceClass::EncryptionOrDecryptionController(match subclass_id {
-                0x0 => PciDeviceClassEncryptionControllerSubclass::NetworkAndComputingEncryptionOrDecryption,
-                0x10 => PciDeviceClassEncryptionControllerSubclass::EntertainmentEncryptionOrDecryption,
+            0x10 => PciDeviceClass::EncryptionController(match subclass_id {
+                0x0 => EncryptionControllerSubclass::NetworkAndComputing,
+                0x10 => EncryptionControllerSubclass::Entertainment,
                 _ => unreachable!(),
             }),
-            0x11 => PciDeviceClass::DataAcquisitionAndSignalProcessingController(match subclass_id {
-                0x0 => PciDeviceClassSignalProcessingControllerSubclass::DpioModules,
-                0x1 => PciDeviceClassSignalProcessingControllerSubclass::PerformanceCounters,
-                0x10 => PciDeviceClassSignalProcessingControllerSubclass::CommunicationSynchronizer,
-                0x20 => PciDeviceClassSignalProcessingControllerSubclass::SignalProcessingManagement,
-                _ => unreachable!(),
-            }),
+            0x11 => {
+                PciDeviceClass::DataAcquisitionAndSignalProcessingController(match subclass_id {
+                    0x0 => SignalProcessingControllerSubclass::DpioModules,
+                    0x1 => SignalProcessingControllerSubclass::PerformanceCounters,
+                    0x10 => SignalProcessingControllerSubclass::CommunicationSynchronizer,
+                    0x20 => SignalProcessingControllerSubclass::SignalProcessingManagement,
+                    _ => unreachable!(),
+                })
+            }
             0x12 => PciDeviceClass::ProcessingAccelerator,
             0x13 => PciDeviceClass::NonEssentialInstrumentation,
             _ => unreachable!(),
@@ -382,85 +384,85 @@ impl PciDeviceClass {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassUndefinedSubclass {
+pub enum UndefinedSubclass {
     NonVgaCompatibleUnclassifiedDevice,
     VgaCompatibleUnclassifiedDevice,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassMassStorageControllerSubclass {
-    ScsiBusController,
-    IdeController,
-    FloppyDiskController,
-    IpiBusController,
-    RaidController,
-    AtaController,
-    SataController,
-    SerialAttachedScsiController,
-    NonVolatileMemoryController,
+pub enum MassStorageControllerSubclass {
+    ScsiBus,
+    Ide,
+    FloppyDisk,
+    IpiBus,
+    Raid,
+    Ata,
+    Sata,
+    SerialAttachedScsi,
+    NonVolatileMemory,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassNetworkControllerSubclass {
-    EthernetController,
-    TokenRingController,
-    FddiController,
-    AtmController,
-    IsdnController,
-    WorldFipController,
-    PicmgMultimComputingController,
-    InfinibandController,
-    FabricController,
+pub enum NetworkControllerSubclass {
+    Ethernet,
+    TokenRing,
+    Fddi,
+    Atm,
+    Isdn,
+    WorldFip,
+    PicmgMultimComputing,
+    Infiniband,
+    Fabric,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassDisplayControllerSubclass {
-    VgaCompatibleController,
-    XgaController,
-    NotVgaCompatible3dController,
+pub enum DisplayControllerSubclass {
+    VgaCompatible,
+    Xga,
+    NotVgaCompatible3d,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassMultimediaControllerSubclass {
-    MultimediaVideoController,
-    MultimediaAudioController,
+pub enum MultimediaControllerSubclass {
+    MultimediaVideo,
+    MultimediaAudio,
     ComputerTelephonyDevice,
     AudioDevice,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassMemoryControllerSubclass {
-    RamController,
-    FlashController,
+pub enum MemoryControllerSubclass {
+    Ram,
+    Flash,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassBridgeSubclass {
-    HostBridge,
-    IsaBridge,
-    EisaBridge,
-    McaBridge,
-    PciToPciBridge,
-    PcmciaBridge,
-    NuBusBridge,
-    CardBusBridge,
-    RaceWayBridge,
-    PciToPciBridge2,
-    InfiniBandToPciHostBridge,
+pub enum BridgeSubclass {
+    Host,
+    Isa,
+    Eisa,
+    Mca,
+    PciToPci,
+    Pcmcia,
+    NuBus,
+    CardBus,
+    RaceWay,
+    PciToPci2,
+    InfiniBandToPciHost,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassSimpleCommunicationControllerSubclass {
-    SerialController,
-    ParallelController,
-    MultiportSerialController,
+pub enum SimpleCommunicationControllerSubclass {
+    Serial,
+    Parallel,
+    MultiportSerial,
     Modem,
-    GpibController,
-    SmartCardController,
+    Gpib,
+    SmartCard,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassBaseSystemPeripheralSubclass {
+pub enum BaseSystemPeripheralSubclass {
     Pic,
     DmaController,
     Timer,
@@ -471,22 +473,22 @@ pub enum PciDeviceClassBaseSystemPeripheralSubclass {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassInputDeviceControllerSubclass {
-    KeyboardController,
+pub enum InputDeviceControllerSubclass {
+    Keyboard,
     DigitizerPen,
-    MouseController,
-    ScannerController,
-    GameportController,
+    Mouse,
+    Scanner,
+    Gameport,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassDockingStationSubclass {
+pub enum DockingStationSubclass {
     Generic,
 }
 
 #[allow(nonstandard_style)]
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassProcessorSubclass {
+pub enum ProcessorSubclass {
     x386,
     x486,
     Pentium,
@@ -498,51 +500,51 @@ pub enum PciDeviceClassProcessorSubclass {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassSerialBusControllerSubclass {
-    FireWireController,
-    AccessBusController,
+pub enum SerialBusControllerSubclass {
+    FireWire,
+    AccessBus,
     Ssa,
     UsbController,
     FibreChannel,
     SmbusController,
-    InfiniBandController,
+    InfiniBand,
     IpmiInterface,
     SercosInterface,
-    CanbusController,
+    Canbus,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassWirelessControllerSubclass {
-    IrdaCompatibleController,
-    ConsumerIrController,
-    RfController,
-    BluetoothController,
-    BroadbandController,
-    EthernetControllerA,
-    EthernetControllerB,
+pub enum WirelessControllerSubclass {
+    IrdaCompatible,
+    ConsumerIr,
+    Rf,
+    Bluetooth,
+    Broadband,
+    EthernetA,
+    EthernetB,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassIntelligentControllerSubclass {
+pub enum IntelligentControllerSubclass {
     I20,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassSatelliteCommunicationControllerSubclass {
-    SatelliteTvController,
-    SatelliteAudioController,
-    SatelliteVoiceController,
-    SatelliteDataController,
+pub enum SatelliteCommunicationControllerSubclass {
+    Tv,
+    Audio,
+    Voice,
+    Data,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassEncryptionControllerSubclass {
-    NetworkAndComputingEncryptionOrDecryption,
-    EntertainmentEncryptionOrDecryption,
+pub enum EncryptionControllerSubclass {
+    NetworkAndComputing,
+    Entertainment,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-pub enum PciDeviceClassSignalProcessingControllerSubclass {
+pub enum SignalProcessingControllerSubclass {
     DpioModules,
     PerformanceCounters,
     CommunicationSynchronizer,

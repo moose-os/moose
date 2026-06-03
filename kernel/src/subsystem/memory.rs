@@ -1362,7 +1362,7 @@ impl VirtualAddress {
     }
 
     pub fn is_aligned_to(&self, alignment: u64) -> bool {
-        self.0 % alignment == 0
+        self.0.is_multiple_of(alignment)
     }
 
     #[inline]
@@ -1391,7 +1391,7 @@ impl PhysicalAddress {
     }
 
     pub fn is_aligned_to(&self, alignment: u64) -> bool {
-        self.0 % alignment == 0
+        self.0.is_multiple_of(alignment)
     }
 
     #[inline]

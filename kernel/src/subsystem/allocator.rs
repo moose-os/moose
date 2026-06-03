@@ -16,7 +16,7 @@ pub(crate) const HEAP_START: usize = 0x4444_4444_0000;
 const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 #[global_allocator]
-static mut ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator::empty();
+static ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator::empty();
 
 pub fn initialize_heap() -> Result<(), MemoryError> {
     let mut memory_manager = memory_manager().write();
@@ -51,7 +51,7 @@ impl KernelHeapAllocator {
         Self { inner: Once::new() }
     }
 
-    unsafe fn initialize(&mut self, heap_bottom: *mut u8, heap_size: usize) {
+    unsafe fn initialize(&self, heap_bottom: *mut u8, heap_size: usize) {
         self.inner.call_once(|| {
             let mut heap = Heap::empty();
 

@@ -55,7 +55,7 @@ pub const STACK_SIZE: usize = 4 * 1024 * 1024;
 pub const LOCAL_APIC_TIMER_PERIODIC: u32 = 1 << 17;
 
 pub static TRAMPOLINE_CODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/trampoline"));
-pub static mut AP_STARTUP_SPINLOCK: RwLock<u8> = RwLock::new(0);
+pub static AP_STARTUP_SPINLOCK: RwLock<u8> = RwLock::new(0);
 
 pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Kernel) -> ! {
     IDT.lock().load();

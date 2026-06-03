@@ -1,5 +1,5 @@
 use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
-use core::{cmp::min, mem::transmute};
+use core::{array, cmp::min, mem::transmute};
 
 use deku::{
     no_std_io::{Read, Seek},
@@ -392,10 +392,8 @@ impl Ata {
         while (inb(io_base + ATA_REG_STATUS) & ATA_SR_BSY) != 0 {}
 
         // Read IDENTITY command response (it's not possible using DMA so need to use PIO mode)
-        let mut identify_response = [0u16; (ATA_SECTOR_SIZE / 2) as usize];
-        for i in 0..(ATA_SECTOR_SIZE / 2) as usize {
-            identify_response[i] = inw(io_base + ATA_REG_DATA);
-        }
+        let identify_response: [u16; (ATA_SECTOR_SIZE / 2) as usize] =
+            array::from_fn(|_| inw(io_base + ATA_REG_DATA));
 
         let identify_response_as_bytes: [u8; 512] = unsafe { transmute(identify_response) };
         let parsed_identify_response =

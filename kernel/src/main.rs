@@ -33,7 +33,7 @@ use crate::{
     kernel::kernel_ref,
     subsystem::{
         logger::init_logger,
-        memory::{memory_manager, Frame, PageFlags, PageTable, PhysicalAddress},
+        memory::{Frame, PageFlags, PageTable, PhysicalAddress, memory_manager},
         process::DEFAULT_THREAD_PRIORITY,
         scheduler::Scheduler,
     },

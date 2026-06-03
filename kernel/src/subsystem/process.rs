@@ -68,7 +68,7 @@ impl Thread {
     }
 
     pub fn set_status(&self, new_status: Status) {
-        let current_status = self.0.status.lock().clone();
+        let current_status = *self.0.status.lock();
         *self.0.status.lock() = new_status;
 
         match current_status {
