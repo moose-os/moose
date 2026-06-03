@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     ffi::c_void,
     mem,
@@ -42,7 +42,7 @@ use crate::{
             Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
             HIGHEST_THREAD_PRIORITY,
         },
-        scheduler,
+        scheduler::{self, Scheduler},
         terminal::Terminal,
     },
 };
@@ -73,6 +73,15 @@ pub struct Kernel {
     current_usable_process_id: AtomicUsize,
     current_usable_thread_id: AtomicUsize,
     processes: RwLock<Vec<Process>>,
+
+    pub scheduler: Scheduler,
+    /// A global queue for threads waiting on a timed sleep or timeout.
+    ///
+    /// ### Data Structure:
+    /// Entry in the vector is a tuple of `(usize, Thread)`:
+    /// * `usize`: The absolute tick count at which the timeout expires.
+    /// * `Thread`: The handle or descriptor of the thread to be woken up.
+    pub timeout_queue: Mutex<VecDeque<(u64, Thread)>>,
 }
 
 unsafe impl Send for Kernel {}
@@ -112,6 +121,9 @@ impl Kernel {
             current_usable_process_id: AtomicUsize::new(0),
             current_usable_thread_id: AtomicUsize::new(0),
             processes: RwLock::new(Vec::new()),
+
+            scheduler: Scheduler::new(),
+            timeout_queue: Mutex::new(VecDeque::new()),
         }
     }
 

@@ -20,7 +20,7 @@ use crate::{
     subsystem::{
         memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
         process::{Registers, Status},
-        scheduler::{self, TIMEOUT_QUEUE},
+        scheduler,
     },
 };
 
@@ -348,7 +348,7 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
 
                 // Process TIMEOUT_QUEUE to expire timers and wake up waiting threads
                 {
-                    let mut queue = TIMEOUT_QUEUE.get().unwrap().lock();
+                    let mut queue = kernel_ref().timeout_queue.lock();
 
                     // Since TIMEOUT_QUEUE is sorted by expiration time (ascending),
                     // we only need to inspect the head of the queue. If the first

@@ -1,9 +1,5 @@
 use alloc::{sync::Arc, vec::Vec};
-use core::{
-    alloc::Layout,
-    ffi::c_void,
-    sync::atomic::{AtomicBool, AtomicUsize},
-};
+use core::{alloc::Layout, ffi::c_void, sync::atomic::AtomicBool};
 
 use spin::{Mutex, MutexGuard, Spin};
 
@@ -11,7 +7,7 @@ use crate::{
     kernel::kernel_ref,
     subsystem::{
         memory::PageTable,
-        scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
+        scheduler::{self, PRIORITIES_NUM},
     },
 };
 
@@ -23,11 +19,6 @@ pub const LOWEST_THREAD_PRIORITY: usize = 0;
 
 /// Maximum execution priority (most urgent).
 pub const HIGHEST_THREAD_PRIORITY: usize = PRIORITIES_NUM - 1;
-
-static CURRENT_USABLE_PROCESS_ID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_USABLE_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-
-static mut PROCESSES: Vec<Process> = Vec::new();
 
 pub type ProcessId = usize;
 
@@ -102,8 +93,8 @@ impl Thread {
             + sleep_time_in_ticks;
 
         // Insert thread to TIMEOUT_QUEUE and change its status to Status::Waiting
-        if let Some(mutex) = TIMEOUT_QUEUE.get() {
-            let mut queue = mutex.lock();
+        {
+            let mut queue = kernel_ref().timeout_queue.lock();
 
             // Find the correct position for the new timeout.
             // If multiple threads have the same expiration, this inserts after them.
