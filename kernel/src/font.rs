@@ -18598,7 +18598,7 @@ impl Font {
             0x2600..=0x26FF => Some(&self.miscellaneous_symbols[character as usize - 0x2600]),
             0xFB00..=0xFB4F => None, // Alphabetic Presentation Forms
             0xFB50..=0xFDFF => Some(&self.arabic_presentatiom_forms_a[character as usize - 0xFB50]),
-            0xFB70..=0xFEFF => Some(&self.arabic_presentatiom_forms_b[character as usize - 0xFB70]),
+            0xFE70..=0xFEFF => Some(&self.arabic_presentatiom_forms_b[character as usize - 0xFB70]),
             _ => None,
         }
     }
