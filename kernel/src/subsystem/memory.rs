@@ -56,12 +56,14 @@ impl MemoryManager {
         frame: &Frame,
         page_flags: PageFlags,
     ) -> Result<(), MemoryError> {
-        self.map(
-            current_page_table(self.physical_memory_offset),
-            page,
-            frame,
-            page_flags,
-        )
+        unsafe {
+            self.map(
+                current_page_table(self.physical_memory_offset),
+                page,
+                frame,
+                page_flags,
+            )
+        }
     }
 
     pub unsafe fn map(
@@ -81,11 +83,11 @@ impl MemoryManager {
         page_flags: PageFlags,
         f: impl FnOnce(),
     ) -> Result<(), MemoryError> {
-        self.map_for_current_address_space(page, frame, page_flags)?;
+        unsafe { self.map_for_current_address_space(page, frame, page_flags) }?;
 
         f();
 
-        self.unmap_for_current_address_space(page)
+        unsafe { self.unmap_for_current_address_space(page) }
     }
 
     pub unsafe fn map_identity_for_current_address_space(
@@ -93,11 +95,13 @@ impl MemoryManager {
         page: &Page,
         page_flags: PageFlags,
     ) -> Result<(), MemoryError> {
-        self.map_for_current_address_space(
-            page,
-            &Frame::new(PhysicalAddress::new(page.address().as_u64())),
-            page_flags,
-        )
+        unsafe {
+            self.map_for_current_address_space(
+                page,
+                &Frame::new(PhysicalAddress::new(page.address().as_u64())),
+                page_flags,
+            )
+        }
     }
 
     pub unsafe fn map_identity_temporary_for_current_address_space(
@@ -106,11 +110,11 @@ impl MemoryManager {
         page_flags: PageFlags,
         f: impl FnOnce(),
     ) -> Result<(), MemoryError> {
-        self.map_identity_for_current_address_space(page, page_flags)?;
+        unsafe { self.map_identity_for_current_address_space(page, page_flags) }?;
 
         f();
 
-        self.unmap_for_current_address_space(page)
+        unsafe { self.unmap_for_current_address_space(page) }
     }
 
     pub unsafe fn map_any_for_current_address_space(
@@ -119,7 +123,7 @@ impl MemoryManager {
         page_flags: PageFlags,
     ) -> Page {
         self.map_any_inner(
-            current_page_table(self.physical_memory_offset),
+            unsafe { current_page_table(self.physical_memory_offset) },
             frame,
             page_flags,
         )
@@ -131,11 +135,11 @@ impl MemoryManager {
         page_flags: PageFlags,
         f: impl FnOnce(Page),
     ) -> Result<(), MemoryError> {
-        let page = self.map_any_for_current_address_space(frame, page_flags);
+        let page = unsafe { self.map_any_for_current_address_space(frame, page_flags) };
 
         f(page);
 
-        self.unmap_for_current_address_space(&page)
+        unsafe { self.unmap_for_current_address_space(&page) }
     }
 
     pub unsafe fn map_any_contiguous_for_current_address_space(
@@ -143,11 +147,13 @@ impl MemoryManager {
         frame_range: FrameRange,
         page_flags: PageFlags,
     ) -> PageRange {
-        self.map_any_contiguous(
-            current_page_table(self.physical_memory_offset),
-            frame_range,
-            page_flags,
-        )
+        unsafe {
+            self.map_any_contiguous(
+                current_page_table(self.physical_memory_offset),
+                frame_range,
+                page_flags,
+            )
+        }
     }
 
     pub unsafe fn map_any_contiguous(
@@ -407,7 +413,10 @@ impl MemoryManager {
     }
 
     pub unsafe fn unmap_for_current_address_space(&self, page: &Page) -> Result<(), MemoryError> {
-        self.unmap_inner(current_page_table(self.physical_memory_offset), page)
+        self.unmap_inner(
+            unsafe { current_page_table(self.physical_memory_offset) },
+            page,
+        )
     }
 
     pub unsafe fn unmap(&self, page_table: *mut PageTable, page: &Page) -> Result<(), MemoryError> {

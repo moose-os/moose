@@ -9,10 +9,10 @@ use core::{
 };
 
 use x86_64::{
+    PhysAddr,
     instructions::tlb,
     registers::control::{Cr0, Cr0Flags, Cr3, Cr3Flags, Cr4, Cr4Flags, Efer, EferFlags},
     structures::paging::{PhysFrame, Size4KiB},
-    PhysAddr,
 };
 
 use crate::{
@@ -21,32 +21,34 @@ use crate::{
 };
 
 pub unsafe fn perform_arch_initialization(is_bsp: bool) {
-    Efer::write(Efer::read() | EferFlags::NO_EXECUTE_ENABLE);
+    unsafe {
+        Efer::write(Efer::read() | EferFlags::NO_EXECUTE_ENABLE);
 
-    Cr0::write(
-        Cr0::read().difference(Cr0Flags::EMULATE_COPROCESSOR)
-            | Cr0Flags::NUMERIC_ERROR
-            | Cr0Flags::MONITOR_COPROCESSOR,
-    );
-    // We don't really need to check whether SSE and SSE2 is present as long mode requires them.
-    // We wouldn't even get here without those extensions.
-    Cr4::write(
-        Cr4::read()
-            | Cr4Flags::PAGE_GLOBAL
-            | Cr4Flags::FSGSBASE
-            | Cr4Flags::OSFXSR
-            | Cr4Flags::OSXMMEXCPT_ENABLE,
-    );
+        Cr0::write(
+            Cr0::read().difference(Cr0Flags::EMULATE_COPROCESSOR)
+                | Cr0Flags::NUMERIC_ERROR
+                | Cr0Flags::MONITOR_COPROCESSOR,
+        );
+        // We don't really need to check whether SSE and SSE2 is present as long mode requires them.
+        // We wouldn't even get here without those extensions.
+        Cr4::write(
+            Cr4::read()
+                | Cr4Flags::PAGE_GLOBAL
+                | Cr4Flags::FSGSBASE
+                | Cr4Flags::OSFXSR
+                | Cr4Flags::OSXMMEXCPT_ENABLE,
+        );
 
-    arch::asm!("fninit");
+        arch::asm!("fninit");
 
-    if is_bsp {
-        setup_gdt();
+        if is_bsp {
+            setup_gdt();
+        }
+
+        load_gdt();
+
+        idt::init_idt();
     }
-
-    load_gdt();
-
-    idt::init_idt();
 }
 
 pub fn use_kernel_page_table(closure: impl FnOnce()) {
@@ -105,6 +107,7 @@ pub struct InterruptStack([u8; 16 * 1024]);
 impl InterruptStack {
     #[inline]
     pub unsafe fn allocate() -> *mut InterruptStack {
-        alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack
+        (unsafe { alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) })
+            as *mut InterruptStack
     }
 }

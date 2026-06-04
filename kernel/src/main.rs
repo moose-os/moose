@@ -41,7 +41,7 @@ use crate::{
 
 const_assert!(size_of::<arch::x86::idt::Idt>() == 256 * 16);
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 unsafe extern "C" fn _start() -> ! {
     let stack_pointer = read_rsp();
 
@@ -63,12 +63,14 @@ unsafe extern "C" fn _start() -> ! {
     let cpu_id = CpuId::new();
     let feature_info = cpu_id.get_feature_info().expect("...");
 
-    arch::x86::perform_arch_initialization(true);
+    unsafe { arch::x86::perform_arch_initialization(true) };
 
     kernel.initialize_memory();
 
-    setup_tss(0);
-    load_tss(0);
+    unsafe {
+        setup_tss(0);
+        load_tss(0);
+    }
 
     kernel.retrieve_gdt();
 
@@ -86,11 +88,13 @@ unsafe extern "C" fn _start() -> ! {
 
     kernel.initialize_pit();
 
-    initialize_acpica().expect("ACPICA initialization failed");
+    unsafe {
+        initialize_acpica().expect("ACPICA initialization failed");
 
-    ProcessorControlBlock::create_pcb_for_current_processor(
-        feature_info.initial_local_apic_id() as u16
-    );
+        ProcessorControlBlock::create_pcb_for_current_processor(
+            feature_info.initial_local_apic_id() as u16,
+        );
+    }
 
     info!("Initializing ACPI...");
 

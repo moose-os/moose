@@ -4,7 +4,7 @@ use bitfield_struct::bitfield;
 use bitflags::bitflags;
 use spin::{Mutex, Once};
 
-use crate::arch::x86::{cpu::MAXIMUM_CPU_CORES, InterruptStack};
+use crate::arch::x86::{InterruptStack, cpu::MAXIMUM_CPU_CORES};
 
 pub(crate) const KERNEL_MODE_CODE_SEGMENT_INDEX: usize = 5;
 pub(crate) const KERNEL_MODE_DATA_SEGMENT_INDEX: usize = 6;
@@ -44,7 +44,7 @@ pub unsafe fn setup_gdt() {
 
         for (index, tss_segment) in gdt.tss_segments.iter_mut().enumerate() {
             *tss_segment = SystemSegmentDescriptor::new(
-                (TSS.lock().as_ptr()).add(index) as u64,
+                unsafe { (TSS.lock().as_ptr()).add(index) } as u64,
                 mem::size_of::<TaskStateSegment>() as u32,
                 SystemSegmentDescriptorAttributes::new()
                     .with_present(true)
@@ -66,17 +66,19 @@ pub unsafe fn setup_gdt() {
 
 #[inline(always)]
 pub unsafe fn load_gdt() {
-    asm!(
-        "lgdt [{gdt}]",
-        gdt = in(reg) addr_of!(GDT_DESCRIPTOR) as u64,
-    );
+    unsafe {
+        asm!(
+            "lgdt [{gdt}]",
+            gdt = in(reg) addr_of!(GDT_DESCRIPTOR) as u64,
+        )
+    };
 }
 
 pub unsafe fn setup_tss(processor_index: u16) {
     let mut tss = TSS.lock();
 
-    let interrupt_stack =
-        alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) as *mut InterruptStack;
+    let interrupt_stack = unsafe { alloc::alloc::alloc_zeroed(Layout::new::<InterruptStack>()) }
+        as *mut InterruptStack;
 
     tss[processor_index as usize].rsp0 =
         interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
@@ -86,13 +88,13 @@ pub unsafe fn setup_tss(processor_index: u16) {
 
 #[inline(always)]
 pub unsafe fn load_tss(processor_index: u16) {
-    asm!(
-        "
-        ltr {segment:x}
-    ",
-        segment = in(reg_abcd) (((9 + (processor_index * 2)) << 3) | 3),
-        options(nostack, nomem)
-    );
+    unsafe {
+        asm!(
+            "ltr {segment:x}",
+            segment = in(reg_abcd) (((9 + (processor_index * 2)) << 3) | 3),
+            options(nostack, nomem)
+        )
+    };
 }
 
 // See Intel Manuals Combined, Volume C, 3.5.1, p. 3087, Fig. 3-11 for details

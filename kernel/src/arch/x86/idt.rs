@@ -280,14 +280,16 @@ impl Idt {
     }
 
     pub unsafe fn load(&mut self) {
-        asm!(
-            "lidt [{}]",
-            in(reg) &Idtr {
-                limit: (core::mem::size_of::<Idt>() - 1) as u16,
-                base: self as *const _ as u64,
-            } as *const Idtr,
-            options(nostack, preserves_flags)
-        );
+        unsafe {
+            asm!(
+                "lidt [{}]",
+                in(reg) &Idtr {
+                    limit: (core::mem::size_of::<Idt>() - 1) as u16,
+                    base: self as *const _ as u64,
+                } as *const Idtr,
+                options(nostack, preserves_flags)
+            )
+        };
     }
 }
 

@@ -16,9 +16,9 @@ use crate::{
         idt::IDT,
         use_kernel_page_table,
     },
-    kernel::{kernel_ref, Kernel},
+    kernel::{Kernel, kernel_ref},
     subsystem::{
-        memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
+        memory::{MemoryError, Page, PageFlags, VirtualAddress, memory_manager},
         process::{Registers, Status},
         scheduler,
     },
@@ -58,13 +58,19 @@ pub static TRAMPOLINE_CODE: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/tr
 pub static AP_STARTUP_SPINLOCK: RwLock<u8> = RwLock::new(0);
 
 pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Kernel) -> ! {
-    IDT.lock().load();
-    Cr4::write(Cr4::read() | Cr4Flags::FSGSBASE);
+    unsafe {
+        IDT.lock().load();
+        Cr4::write(Cr4::read() | Cr4Flags::FSGSBASE);
+    }
 
     disable_interrupts();
-    load_gdt();
 
-    ProcessorControlBlock::create_pcb_for_current_processor(apic_processor_id as u16);
+    unsafe {
+        load_gdt();
+
+        ProcessorControlBlock::create_pcb_for_current_processor(apic_processor_id as u16);
+    }
+
     let pcb = ProcessorControlBlock::current();
     let local_apic = LocalApic::initialize_for_current_processor();
 
@@ -86,7 +92,9 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Ke
     // local_apic.enable_timer();
 
     loop {
-        asm!("hlt");
+        unsafe {
+            asm!("hlt");
+        }
     }
 }
 
@@ -327,7 +335,7 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
     )
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
     scheduler::run(registers);
 

@@ -2,8 +2,8 @@ use alloc::boxed::Box;
 use core::cell::OnceCell;
 
 use x86_64::{
-    registers::segmentation::{Segment64, GS},
     VirtAddr,
+    registers::segmentation::{GS, Segment64},
 };
 
 use crate::driver::apic::LocalApic;
@@ -24,7 +24,7 @@ impl ProcessorControlBlock {
             local_apic: OnceCell::new(),
         }));
 
-        GS::write_base(VirtAddr::new(ptr as *mut _ as u64));
+        unsafe { GS::write_base(VirtAddr::new(ptr as *mut _ as u64)) };
 
         ProcessorControlBlock::current().apic_processor_id = apic_processor_id;
     }

@@ -9,7 +9,7 @@ use linked_list_allocator::Heap;
 use spin::{Mutex, Once};
 
 use crate::subsystem::memory::{
-    memory_manager, MemoryError, Page, PageFlags, VirtualAddress, PAGE_SIZE,
+    MemoryError, PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager,
 };
 
 pub(crate) const HEAP_START: usize = 0x4444_4444_0000;
@@ -55,7 +55,7 @@ impl KernelHeapAllocator {
         self.inner.call_once(|| {
             let mut heap = Heap::empty();
 
-            heap.init(heap_bottom, heap_size);
+            unsafe { heap.init(heap_bottom, heap_size) };
 
             Mutex::new(KernelHeapAllocatorInner {
                 heap: Mutex::new(heap),
@@ -127,7 +127,7 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
 
             let mut heap = inner.heap.lock();
 
-            heap.extend(optimal_frames * PAGE_SIZE);
+            unsafe { heap.extend(optimal_frames * PAGE_SIZE) };
         }
 
         let mut heap = inner.heap.lock();
@@ -143,7 +143,7 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
         let mut heap = inner.heap.lock();
 
         if let Some(ptr) = NonNull::new(ptr) {
-            heap.deallocate(ptr, layout);
+            unsafe { heap.deallocate(ptr, layout) };
         }
     }
 }
