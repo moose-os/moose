@@ -1,7 +1,9 @@
-use alloc::{format, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
+
 use deku::{
-    bitvec::{BitSlice, Msb0},
-    DekuEnumExt, DekuError, DekuRead,
+    DekuError, DekuRead, DekuReader,
+    no_std_io::{Read, Seek},
+    reader::Reader,
 };
 
 #[derive(DekuRead, Debug, Default)]
@@ -19,7 +21,7 @@ pub struct Madt {
     pub creator_revision: u32,
     pub local_apic_address: u32,
     pub flags: u32,
-    #[deku(reader = "madt_reader((*length as usize), deku::rest)")]
+    #[deku(reader = "madt_reader((*length as usize), deku::reader)")]
     pub entries: Vec<MadtEntry>,
 }
 
@@ -138,24 +140,21 @@ pub struct MadtLocalx2ApicNonMaskableInterrupts {
     pub reserved: u32,
 }
 
-fn madt_reader(
+fn madt_reader<R: Read + Seek>(
     length: usize,
-    rest: &BitSlice<u8, Msb0>,
-) -> Result<(&BitSlice<u8, Msb0>, Vec<MadtEntry>), DekuError> {
+    reader: &mut Reader<R>,
+) -> Result<Vec<MadtEntry>, DekuError> {
     let mut remaining_bytes = length - 0x2C;
 
     let mut entries = vec![];
 
-    let mut rest = rest;
-
     while remaining_bytes > 0 {
-        let (remaining_slice, entry) = MadtEntry::read(rest, ())?;
+        let entry = MadtEntry::from_reader_with_ctx(reader, ())?;
 
-        rest = remaining_slice;
         remaining_bytes -= entry.record_length as usize;
 
         entries.push(entry);
     }
 
-    Ok((rest, entries))
+    Ok(entries)
 }

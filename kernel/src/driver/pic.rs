@@ -3,8 +3,6 @@ use pic8259::ChainedPics;
 pub const PIC_1_OFFSET: u8 = 32;
 pub const PIC_2_OFFSET: u8 = PIC_1_OFFSET + 8;
 
-pub static mut PIC: ProgrammableInterruptController = ProgrammableInterruptController::new();
-
 // Basically it's wrapper around pic8259's ChainedPics structure with some
 // extra helper functions
 pub struct ProgrammableInterruptController {

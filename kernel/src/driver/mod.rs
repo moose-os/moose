@@ -5,3 +5,5 @@ pub mod net;
 pub mod pci;
 pub mod pic;
 pub mod pit;
+pub mod serial;
+pub mod vga;

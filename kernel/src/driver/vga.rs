@@ -1,17 +1,18 @@
 use core::ptr;
 
-use crate::font::DEFAULT_ASCII_FONT;
 use limine::framebuffer::Framebuffer;
+
+use crate::font::DEFAULT_ASCII_FONT;
 
 const BITS_PER_PIXEL: u64 = 32;
 const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;
 
 pub struct Vga {
-    framebuffer: Framebuffer<'static>,
+    framebuffer: &'static Framebuffer<'static>,
 }
 
 impl Vga {
-    pub fn new(framebuffer: Framebuffer<'static>) -> Self {
+    pub fn new(framebuffer: &'static Framebuffer<'static>) -> Self {
         // TODO: Research whether BPP does in practice have other values than 32 and if so,
         //       lift this restriction
         assert_eq!(framebuffer.bpp(), 32);

@@ -1,4 +1,4 @@
-pub mod acpica;
+mod acpica;
 mod devices;
 mod hid;
 mod madt;
@@ -6,24 +6,25 @@ mod rsdp;
 mod sdt;
 
 pub use acpica::*;
-use acpica_rs::{
-    set_os_services_implementation,
-    sys::{
-        AcpiEnableSubsystem, AcpiInitializeObjects, AcpiInitializeSubsystem, AcpiInitializeTables,
-        AcpiLoadTables, ACPI_FULL_INITIALIZATION,
-    },
-    AE_OK,
-};
 pub use devices::*;
 pub use madt::*;
 pub use rsdp::*;
 pub use sdt::*;
 
-use crate::memory::{
-    memory_manager, Frame, MemoryError, Page, PageFlags, PhysicalAddress, VirtualAddress,
-};
 use alloc::{boxed::Box, sync::Arc};
 use core::{mem, ptr, slice};
+
+use acpica_rs::{
+    AE_OK, set_os_services_implementation,
+    sys::{
+        ACPI_FULL_INITIALIZATION, AcpiEnableSubsystem, AcpiInitializeObjects,
+        AcpiInitializeSubsystem, AcpiInitializeTables, AcpiLoadTables,
+    },
+};
+
+use crate::subsystem::memory::{
+    Frame, MemoryError, Page, PageFlags, PhysicalAddress, VirtualAddress, memory_manager,
+};
 
 /// Root System Description Pointer Signature
 const RSDP_SIGNATURE: [u8; 8] = *b"RSD PTR ";
@@ -206,23 +207,23 @@ pub enum AcpicaError {
 pub unsafe fn initialize_acpica() -> Result<(), AcpicaError> {
     set_os_services_implementation(Box::new(MooseAcpicaOsImplementation {}));
 
-    if AcpiInitializeSubsystem() != AE_OK {
+    if unsafe { AcpiInitializeSubsystem() } != AE_OK {
         return Err(AcpicaError::InitializeSubsystem);
     }
 
-    if AcpiInitializeTables(ptr::null_mut(), 16, true as u8) != AE_OK {
+    if unsafe { AcpiInitializeTables(ptr::null_mut(), 16, true as u8) } != AE_OK {
         return Err(AcpicaError::InitializeTables);
     }
 
-    if AcpiLoadTables() != AE_OK {
+    if unsafe { AcpiLoadTables() } != AE_OK {
         return Err(AcpicaError::LoadTables);
     }
 
-    if AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION) != AE_OK {
+    if unsafe { AcpiEnableSubsystem(ACPI_FULL_INITIALIZATION) } != AE_OK {
         return Err(AcpicaError::EnableSubsystem);
     }
 
-    if AcpiInitializeObjects(ACPI_FULL_INITIALIZATION) != AE_OK {
+    if unsafe { AcpiInitializeObjects(ACPI_FULL_INITIALIZATION) } != AE_OK {
         return Err(AcpicaError::InitializeObjects);
     }
 

@@ -1,10 +1,17 @@
-use crate::arch::x86::asm::outb;
-use crate::arch::x86::idt::{register_interrupt_handler, ExceptionFrame};
-use crate::driver::pic::{PIC, PIC_1_OFFSET};
 use alloc::boxed::Box;
 use core::arch::asm;
+
 use spin::RwLock;
 use x86_64::instructions::interrupts::without_interrupts;
+
+use crate::{
+    arch::x86::{
+        asm::outb,
+        idt::{ExceptionFrame, register_interrupt_handler_closure},
+    },
+    driver::pic::PIC_1_OFFSET,
+    kernel::kernel_ref,
+};
 
 // CPU Timer
 const CHANNEL0_DATA_PORT: u16 = 0x40;
@@ -16,8 +23,6 @@ const CHANNEL1_DATA_PORT: u16 = 0x41;
 const CHANNEL2_DATA_PORT: u16 = 0x42;
 const COMMAND_REGISTER: u16 = 0x43;
 const PIT_TIMER: u8 = PIC_1_OFFSET;
-
-pub static mut PIT: ProgrammableIntervalTimer = ProgrammableIntervalTimer::new();
 
 pub struct ProgrammableIntervalTimer {
     ticks: RwLock<u32>,
@@ -66,7 +71,7 @@ impl ProgrammableIntervalTimer {
         outb(CHANNEL0_DATA_PORT, (divisor >> 8) as u8);
 
         // Set timer interrupt handler
-        register_interrupt_handler(
+        register_interrupt_handler_closure(
             PIT_TIMER,
             Box::new(|isf, _registers| pit_interrupt_handler(isf)),
         );
@@ -76,14 +81,15 @@ impl ProgrammableIntervalTimer {
         self.initialized = true;
     }
 
-    pub fn wait_seconds(&mut self, seconds: u16) {
+    //pub fn wait_seconds(&mut self, seconds: u16) {
+    pub fn wait_seconds(&self, seconds: u16) {
         if !self.initialized {
             panic!("PIT not initialized!");
         }
 
         *self.ticks.write() = 0;
 
-        unsafe { PIC.unmask_interrupt(0) };
+        kernel_ref().pic().lock().unmask_interrupt(0);
 
         // Spinlock :(
         loop {
@@ -94,18 +100,19 @@ impl ProgrammableIntervalTimer {
             unsafe { asm!("hlt") };
         }
 
-        unsafe { PIC.mask_interrupt(0) };
+        kernel_ref().pic().lock().mask_interrupt(0);
     }
 
     // @TODO: Refactor
-    pub fn wait_sixteen_millis(&mut self) {
+    //pub fn wait_sixteen_millis(&mut self) {
+    pub fn wait_sixteen_millis(&self) {
         if !self.initialized {
             panic!("PIT not initialized!");
         }
 
         *self.ticks.write() = 0;
 
-        unsafe { PIC.unmask_interrupt(0) };
+        kernel_ref().pic().lock().unmask_interrupt(0);
 
         // Spinlock :(
         loop {
@@ -116,15 +123,17 @@ impl ProgrammableIntervalTimer {
             unsafe { asm!("hlt") };
         }
 
-        unsafe { PIC.mask_interrupt(0) };
+        kernel_ref().pic().lock().mask_interrupt(0);
     }
 
-    fn interrupt_handler(&mut self) {
+    //fn interrupt_handler(&mut self) {
+    fn interrupt_handler(&self) {
         *self.ticks.write() += 1;
     }
 }
 
 fn pit_interrupt_handler(_frame: &ExceptionFrame) {
-    unsafe { PIT.interrupt_handler() }
+    kernel_ref().pit().read().interrupt_handler();
+
     outb(0x20, 0x20);
 }

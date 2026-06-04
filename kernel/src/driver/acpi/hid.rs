@@ -1,7 +1,7 @@
+use alloc::string::String;
 use core::fmt::{self, Debug, Formatter};
 
-use alloc::string::String;
-use phf::{phf_map, Map};
+use phf::{Map, phf_map};
 
 // https://github.com/kernkonzept/io/blob/master/io/doc/acpi-pnp-ids.txt
 static ACPI_HID_TO_HUMAN_READABLE_NAME_MAPPING: Map<&'static str, &'static str> = phf_map! {

@@ -1,14 +1,15 @@
+use alloc::{sync::Arc, vec::Vec};
+use core::{alloc::Layout, ffi::c_void, sync::atomic::AtomicBool};
+
+use spin::{Mutex, MutexGuard, Spin};
+
 use crate::{
     kernel::kernel_ref,
-    memory::PageTable,
-    scheduler::{self, PRIORITIES_NUM, TIMEOUT_QUEUE},
+    subsystem::{
+        memory::PageTable,
+        scheduler::{self, PRIORITIES_NUM},
+    },
 };
-use alloc::{sync::Arc, vec::Vec};
-use core::{
-    ffi::c_void,
-    sync::atomic::{AtomicBool, AtomicUsize},
-};
-use spin::{Mutex, MutexGuard};
 
 /// Default priority assigned to new threads (middle of the range).
 pub const DEFAULT_THREAD_PRIORITY: usize = PRIORITIES_NUM / 2;
@@ -18,11 +19,6 @@ pub const LOWEST_THREAD_PRIORITY: usize = 0;
 
 /// Maximum execution priority (most urgent).
 pub const HIGHEST_THREAD_PRIORITY: usize = PRIORITIES_NUM - 1;
-
-static CURRENT_USABLE_PROCESS_ID: AtomicUsize = AtomicUsize::new(0);
-static CURRENT_USABLE_THREAD_ID: AtomicUsize = AtomicUsize::new(0);
-
-static mut PROCESSES: Vec<Process> = Vec::new();
 
 pub type ProcessId = usize;
 
@@ -34,7 +30,7 @@ impl Process {
         self.0.id
     }
 
-    pub fn threads(&self) -> MutexGuard<'_, Vec<Thread>> {
+    pub fn threads(&self) -> MutexGuard<'_, Vec<Thread>, Spin> {
         self.0.threads.lock()
     }
 }
@@ -72,7 +68,7 @@ impl Thread {
     }
 
     pub fn set_status(&self, new_status: Status) {
-        let current_status = self.0.status.lock().clone();
+        let current_status = *self.0.status.lock();
         *self.0.status.lock() = new_status;
 
         match current_status {
@@ -90,15 +86,15 @@ impl Thread {
 
     pub fn sleep(&self, time_in_ms: usize) {
         // Need to convert relative time in miliseconds to absolute kernel tick count
-        let sleep_time_in_ticks = time_in_ms as u64 / kernel_ref().apic.read().ms_per_tick;
+        let sleep_time_in_ticks = time_in_ms as u64 / kernel_ref().apic().read().ms_per_tick;
         let expiration_time = kernel_ref()
             .ticks
             .load(core::sync::atomic::Ordering::SeqCst)
             + sleep_time_in_ticks;
 
         // Insert thread to TIMEOUT_QUEUE and change its status to Status::Waiting
-        if let Some(mutex) = TIMEOUT_QUEUE.get() {
-            let mut queue = mutex.lock();
+        {
+            let mut queue = kernel_ref().timeout_queue.lock();
 
             // Find the correct position for the new timeout.
             // If multiple threads have the same expiration, this inserts after them.
@@ -154,8 +150,13 @@ pub enum Status {
 pub(crate) struct ThreadStack([u8; 16 * 1024]);
 
 impl ThreadStack {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self([0; 16 * 1024])
+    }
+
+    #[inline]
+    pub unsafe fn allocate() -> *mut ThreadStack {
+        (unsafe { alloc::alloc::alloc_zeroed(Layout::new::<ThreadStack>()) }) as *mut ThreadStack
     }
 }
 

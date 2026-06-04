@@ -1,5 +1,6 @@
-use crate::arch::x86::asm::{inb, outb};
 use spin::Mutex;
+
+use crate::arch::x86::asm::{inb, outb};
 
 const COM1: u16 = 0x3f8;
 
@@ -33,7 +34,7 @@ impl SerialPort {
         outb(port + 1, 0x00); // Disable all interrupts
 
         outb(port + 3, 0x80); // Enable DLAB (set baud rate divisor)
-        outb(port + 0, 0x03); // Set divisor to 3 (lo byte) 38400 baud
+        outb(port, 0x03); // Set divisor to 3 (lo byte) 38400 baud
         outb(port + 1, 0x00); //                  (hi byte)
         outb(port + 3, 0x03); // 8 bits, no parity, one stop bit
 
@@ -44,9 +45,9 @@ impl SerialPort {
         outb(port + 4, 0x1E); // Set in loopback mode, test the serial chip
 
         // Test serial chip (send byte 0xAE and check if serial returns same byte)
-        outb(port + 0, 0xAE);
+        outb(port, 0xAE);
 
-        if inb(port + 0) != 0xAE {
+        if inb(port) != 0xAE {
             return Err(());
         }
 
@@ -62,13 +63,19 @@ pub struct Serial {
     port: u16,
 }
 
-impl core::fmt::Write for Serial {
-    fn write_str(&mut self, string: &str) -> core::fmt::Result {
+impl Serial {
+    pub fn output(&mut self, string: &str) {
         for byte in string.bytes() {
             while inb(self.port + 5) & 0x20 == 0 {}
 
             outb(self.port, byte);
         }
+    }
+}
+
+impl core::fmt::Write for Serial {
+    fn write_str(&mut self, string: &str) -> core::fmt::Result {
+        self.output(string);
 
         Ok(())
     }

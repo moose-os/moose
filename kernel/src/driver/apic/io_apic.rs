@@ -1,8 +1,11 @@
-use crate::driver::acpi::MadtIoApic;
-use crate::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress};
-use bitfield_struct::bitfield;
 use core::ptr;
-use log::debug;
+
+use bitfield_struct::bitfield;
+
+use crate::{
+    driver::acpi::MadtIoApic,
+    subsystem::memory::{MemoryError, Page, PageFlags, VirtualAddress, memory_manager},
+};
 
 const IO_APIC_ID_REGISTER: u32 = 0x00;
 const IO_APIC_VERSION_REGISTER: u32 = 0x01;

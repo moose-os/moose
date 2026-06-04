@@ -1,29 +1,22 @@
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
 use core::{
     arch::{asm, naked_asm},
     mem,
     sync::atomic::Ordering,
 };
 
-use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use spin::{once::Once, Mutex};
+use spin::Mutex;
 use x86_64::{
+    PhysAddr,
     instructions::interrupts,
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{PhysFrame, Size4KiB},
-    PhysAddr,
 };
 
-use crate::process::{Registers, Status, Thread, ThreadStack};
-
-static SCHEDULER: Scheduler = Scheduler::new();
-
-/// A global queue for threads waiting on a timed sleep or timeout.
-///
-/// ### Data Structure:
-/// Entry in the vector is a tuple of `(usize, Thread)`:
-/// * `usize`: The absolute tick count at which the timeout expires.
-/// * `Thread`: The handle or descriptor of the thread to be woken up.
-pub static TIMEOUT_QUEUE: Once<Mutex<VecDeque<(u64, Thread)>>> = Once::new();
+use crate::{
+    kernel::kernel_ref,
+    subsystem::process::{Registers, Status, Thread, ThreadStack},
+};
 
 pub const PRIORITIES_NUM: usize = 16;
 
@@ -33,7 +26,7 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    const fn new() -> Self {
+    pub const fn new() -> Self {
         const EMPTY_QUEUE: VecDeque<Thread> = VecDeque::new();
 
         Self {
@@ -45,16 +38,13 @@ impl Scheduler {
 
 impl Scheduler {
     pub fn run() -> ! {
-        if !TIMEOUT_QUEUE.is_completed() {
-            TIMEOUT_QUEUE.call_once(|| Mutex::new(VecDeque::new()));
-        }
-
         loop {
             // Find new thread to execute.
             //
             // Execution queues is mutex-guarded array of vectors for each thread priority.
             // Priority 16 is more important than priority 15, so we need to take reversed iterator.
-            let next_thread = SCHEDULER
+            let next_thread = kernel_ref()
+                .scheduler
                 .execution_queues
                 .lock()
                 .iter_mut()
@@ -73,7 +63,7 @@ impl Scheduler {
             };
 
             // Set newly elected thread as current
-            *SCHEDULER.current_thread.lock() = Some(thread.clone());
+            *kernel_ref().scheduler.current_thread.lock() = Some(thread.clone());
 
             // Prepare processor context
             let process = thread.process();
@@ -184,7 +174,13 @@ struct EventInner {
 }
 
 pub fn current_thread() -> Thread {
-    SCHEDULER.current_thread.lock().as_ref().unwrap().clone()
+    kernel_ref()
+        .scheduler
+        .current_thread
+        .lock()
+        .as_ref()
+        .unwrap()
+        .clone()
 }
 
 pub fn schedule(thread: Thread) {
@@ -196,7 +192,7 @@ pub fn schedule(thread: Thread) {
 
     thread.0.reschedule.store(true, Ordering::SeqCst);
 
-    let mut queues = SCHEDULER.execution_queues.lock();
+    let mut queues = kernel_ref().scheduler.execution_queues.lock();
     let priority = thread.priority().min(PRIORITIES_NUM - 1);
     let target_queue = &mut queues[priority];
 
@@ -228,7 +224,7 @@ pub fn run(registers: *mut Registers) {
 pub fn unschedule(thread: &Thread) {
     thread.0.reschedule.store(false, Ordering::SeqCst);
 
-    let mut queues = SCHEDULER.execution_queues.lock();
+    let mut queues = kernel_ref().scheduler.execution_queues.lock();
 
     let priority = thread.priority().min(PRIORITIES_NUM - 1);
     let target_queue = &mut queues[priority];
@@ -255,8 +251,8 @@ fn restore_registers(registers: *mut Registers) {
 }
 
 fn schedule_next_thread() {
-    let mut current_thread = SCHEDULER.current_thread.lock();
-    let mut queues = SCHEDULER.execution_queues.lock();
+    let mut current_thread = kernel_ref().scheduler.current_thread.lock();
+    let mut queues = kernel_ref().scheduler.execution_queues.lock();
 
     // Handle thread that was executed previously
     if let Some(previous_thread) = current_thread.take() {

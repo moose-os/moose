@@ -1,12 +1,15 @@
-use crate::memory::{MemoryManager, Page, PageFlags, PageTable, VirtualAddress, PAGE_SIZE};
+use core::{cmp::min, slice};
 
 use common::{Cursor, Read, Seek};
-use core::{cmp::min, slice};
 use goblin::elf::{
-    program_header::{self, PF_R, PF_W, PF_X},
     Elf,
+    program_header::{self, PF_R, PF_W, PF_X},
 };
 use snafu::Snafu;
+
+use crate::subsystem::memory::{
+    MemoryManager, PAGE_SIZE, Page, PageFlags, PageTable, VirtualAddress,
+};
 
 pub struct Linker;
 

@@ -3,7 +3,7 @@ pub struct IrqAllocator {
 }
 
 impl IrqAllocator {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { buckets: [0u8; 16] }
     }
 

@@ -1,5 +1,6 @@
+use alloc::{borrow::ToOwned, boxed::Box, fmt, string::String, sync::Arc, vec::Vec};
 use core::{
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     fmt::{Debug, Formatter},
     ops::Range,
     ptr::null_mut,
@@ -7,24 +8,29 @@ use core::{
 };
 
 use acpica_rs::{
+    AE_OK,
     sys::{
-        AcpiGetCurrentResources, AcpiGetObjectInfo, AcpiWalkNamespace, ACPI_BUFFER,
-        ACPI_DEVICE_INFO, ACPI_HANDLE, ACPI_RESOURCE, ACPI_RESOURCE_TYPE_ADDRESS16,
+        ACPI_BUFFER, ACPI_DEVICE_INFO, ACPI_HANDLE, ACPI_RESOURCE, ACPI_RESOURCE_TYPE_ADDRESS16,
         ACPI_RESOURCE_TYPE_ADDRESS32, ACPI_RESOURCE_TYPE_ADDRESS64, ACPI_RESOURCE_TYPE_DMA,
         ACPI_RESOURCE_TYPE_END_TAG, ACPI_RESOURCE_TYPE_EXTENDED_IRQ,
         ACPI_RESOURCE_TYPE_FIXED_MEMORY32, ACPI_RESOURCE_TYPE_IO, ACPI_RESOURCE_TYPE_IRQ,
         ACPI_RESOURCE_TYPE_VENDOR, ACPI_STATUS, ACPI_TYPE_ANY, ACPI_TYPE_DEVICE, ACPI_TYPE_METHOD,
+        AcpiGetCurrentResources, AcpiGetObjectInfo, AcpiWalkNamespace,
     },
-    AE_OK,
 };
-
-use alloc::{borrow::ToOwned, boxed::Box, fmt, string::String, sync::Arc, vec::Vec};
 use spin::Mutex;
 
 use super::hid::AcpiHid;
 
 pub type DeviceHandle = Arc<Mutex<Device>>;
-pub type AcpiHandle = ACPI_HANDLE;
+
+pub struct AcpiHandle(ACPI_HANDLE);
+
+// SAFETY: It's always safe to send non-thread local data across thread boundaries.
+unsafe impl Send for AcpiHandle {}
+
+// SAFETY: ACPICA manages synchronization internally.
+unsafe impl Sync for AcpiHandle {}
 
 /// Represents a device in the system, retrieved from the ACPI AML bytecode.
 pub struct Device {
@@ -232,7 +238,7 @@ fn handle_device_object(
     let device = Arc::new(Mutex::new(Device {
         name,
         hid_name: get_device_hardware_id(device_info).map(AcpiHid::new),
-        handle,
+        handle: AcpiHandle(handle),
         parent: context.current.clone(),
         children: Vec::new(),
         methods: Vec::new(),
@@ -268,7 +274,7 @@ fn handle_method_object(
                 Pointer: data.as_ptr() as *mut _,
             };
 
-            let status = unsafe { AcpiGetCurrentResources(device.handle, &mut resources_buffer) };
+            let status = unsafe { AcpiGetCurrentResources(device.handle.0, &mut resources_buffer) };
             assert_eq!(status, AE_OK);
 
             let mut pointer = resources_buffer.Pointer;
@@ -376,7 +382,7 @@ fn handle_method_object(
 
         device.methods.push(Method {
             name,
-            handle,
+            handle: AcpiHandle(handle),
             arg_count: device_info.ParamCount as usize,
         });
     }

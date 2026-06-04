@@ -1,35 +1,28 @@
+use core::{
+    fmt::Debug,
+    ops::{Index, IndexMut},
+    ptr,
+};
+
 use bitflags::bitflags;
-use core::fmt::Debug;
-use core::ops::{Index, IndexMut};
-use core::ptr;
-use limine::memory_map::EntryType;
-use limine::response::MemoryMapResponse;
+use limine::memory_map::{Entry, EntryType};
 use snafu::Snafu;
-use spin::once::Once;
 use spin::RwLock;
 use x86_64::instructions::tlb;
+
+use crate::kernel::kernel_ref;
 
 pub const PAGE_SIZE: usize = 4096;
 pub const FRAME_SIZE: usize = 4096;
 
-static MEMORY_MANAGER: Once<RwLock<MemoryManager>> = Once::new();
-
-pub fn initialize_memory_manager(frame_allocator: FrameAllocator, physical_memory_offset: u64) {
-    MEMORY_MANAGER.call_once(|| {
-        RwLock::new(MemoryManager {
-            frame_allocator,
-            physical_memory_offset,
-        })
-    });
-}
-
+#[inline(always)]
 pub fn memory_manager() -> &'static RwLock<MemoryManager> {
-    MEMORY_MANAGER.get().unwrap()
+    kernel_ref().memory_manager()
 }
 
 pub struct MemoryManager {
-    frame_allocator: FrameAllocator,
-    physical_memory_offset: u64,
+    pub(crate) frame_allocator: FrameAllocator,
+    pub(crate) physical_memory_offset: u64,
 }
 
 impl MemoryManager {
@@ -64,12 +57,14 @@ impl MemoryManager {
         frame: &Frame,
         page_flags: PageFlags,
     ) -> Result<(), MemoryError> {
-        self.map(
-            current_page_table(self.physical_memory_offset),
-            page,
-            frame,
-            page_flags,
-        )
+        unsafe {
+            self.map(
+                current_page_table(self.physical_memory_offset),
+                page,
+                frame,
+                page_flags,
+            )
+        }
     }
 
     pub unsafe fn map(
@@ -89,11 +84,11 @@ impl MemoryManager {
         page_flags: PageFlags,
         f: impl FnOnce(),
     ) -> Result<(), MemoryError> {
-        self.map_for_current_address_space(page, frame, page_flags)?;
+        unsafe { self.map_for_current_address_space(page, frame, page_flags) }?;
 
         f();
 
-        self.unmap_for_current_address_space(page)
+        unsafe { self.unmap_for_current_address_space(page) }
     }
 
     pub unsafe fn map_identity_for_current_address_space(
@@ -101,11 +96,13 @@ impl MemoryManager {
         page: &Page,
         page_flags: PageFlags,
     ) -> Result<(), MemoryError> {
-        self.map_for_current_address_space(
-            page,
-            &Frame::new(PhysicalAddress::new(page.address().as_u64())),
-            page_flags,
-        )
+        unsafe {
+            self.map_for_current_address_space(
+                page,
+                &Frame::new(PhysicalAddress::new(page.address().as_u64())),
+                page_flags,
+            )
+        }
     }
 
     pub unsafe fn map_identity_temporary_for_current_address_space(
@@ -114,11 +111,11 @@ impl MemoryManager {
         page_flags: PageFlags,
         f: impl FnOnce(),
     ) -> Result<(), MemoryError> {
-        self.map_identity_for_current_address_space(page, page_flags)?;
+        unsafe { self.map_identity_for_current_address_space(page, page_flags) }?;
 
         f();
 
-        self.unmap_for_current_address_space(page)
+        unsafe { self.unmap_for_current_address_space(page) }
     }
 
     pub unsafe fn map_any_for_current_address_space(
@@ -127,7 +124,7 @@ impl MemoryManager {
         page_flags: PageFlags,
     ) -> Page {
         self.map_any_inner(
-            current_page_table(self.physical_memory_offset),
+            unsafe { current_page_table(self.physical_memory_offset) },
             frame,
             page_flags,
         )
@@ -139,11 +136,11 @@ impl MemoryManager {
         page_flags: PageFlags,
         f: impl FnOnce(Page),
     ) -> Result<(), MemoryError> {
-        let page = self.map_any_for_current_address_space(frame, page_flags);
+        let page = unsafe { self.map_any_for_current_address_space(frame, page_flags) };
 
         f(page);
 
-        self.unmap_for_current_address_space(&page)
+        unsafe { self.unmap_for_current_address_space(&page) }
     }
 
     pub unsafe fn map_any_contiguous_for_current_address_space(
@@ -151,11 +148,13 @@ impl MemoryManager {
         frame_range: FrameRange,
         page_flags: PageFlags,
     ) -> PageRange {
-        self.map_any_contiguous(
-            current_page_table(self.physical_memory_offset),
-            frame_range,
-            page_flags,
-        )
+        unsafe {
+            self.map_any_contiguous(
+                current_page_table(self.physical_memory_offset),
+                frame_range,
+                page_flags,
+            )
+        }
     }
 
     pub unsafe fn map_any_contiguous(
@@ -415,7 +414,10 @@ impl MemoryManager {
     }
 
     pub unsafe fn unmap_for_current_address_space(&self, page: &Page) -> Result<(), MemoryError> {
-        self.unmap_inner(current_page_table(self.physical_memory_offset), page)
+        self.unmap_inner(
+            unsafe { current_page_table(self.physical_memory_offset) },
+            page,
+        )
     }
 
     pub unsafe fn unmap(&self, page_table: *mut PageTable, page: &Page) -> Result<(), MemoryError> {
@@ -1052,23 +1054,22 @@ impl MemoryManager {
 }
 
 pub struct FrameAllocator {
-    memory_map_response: &'static MemoryMapResponse,
+    memory_map_entries: &'static [&'static Entry],
     n: usize,
 }
 
 // TODO: Implement more advanced frame allocator
 impl FrameAllocator {
-    pub fn new(memory_map_response: &'static MemoryMapResponse) -> Self {
+    pub fn new(memory_map_entries: &'static [&'static Entry]) -> Self {
         Self {
-            memory_map_response,
+            memory_map_entries,
             n: 0,
         }
     }
 
     pub fn allocate(&mut self) -> Option<Frame> {
         let frame = self
-            .memory_map_response
-            .entries()
+            .memory_map_entries
             .iter()
             .filter(|entry| entry.entry_type == EntryType::USABLE)
             .map(|entry| entry.base..(entry.base + entry.length))
@@ -1371,7 +1372,7 @@ impl VirtualAddress {
     }
 
     pub fn is_aligned_to(&self, alignment: u64) -> bool {
-        self.0 % alignment == 0
+        self.0.is_multiple_of(alignment)
     }
 
     #[inline]
@@ -1400,7 +1401,7 @@ impl PhysicalAddress {
     }
 
     pub fn is_aligned_to(&self, alignment: u64) -> bool {
-        self.0 % alignment == 0
+        self.0.is_multiple_of(alignment)
     }
 
     #[inline]
