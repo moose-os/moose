@@ -9,6 +9,8 @@ use crate::subsystem::syscall::write_syscall;
 
 use super::{gdt::KERNEL_MODE_CODE_SEGMENT_INDEX, use_kernel_page_table};
 
+const_assert!(size_of::<Idt>() == 256 * 16);
+
 pub static IDT: Mutex<Idt> = Mutex::new(Idt::new());
 
 static mut REGISTERED_INTERRUPT_HANDLERS: [Vec<ExceptionHandler>; 224] = {
@@ -488,6 +490,10 @@ extern "C" fn interrupt_handler<const N: usize>(
 ) {
     use_kernel_page_table(|| {
         let interrupt_handlers = unsafe { &REGISTERED_INTERRUPT_HANDLERS[N] };
+
+        if interrupt_handlers.is_empty() {
+            warn!("Interrupt without any handlers was invoked");
+        }
 
         for interrupt_handler in interrupt_handlers {
             interrupt_handler.call(frame, registers);

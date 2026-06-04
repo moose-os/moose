@@ -3,11 +3,9 @@ pub mod cpu;
 pub mod gdt;
 pub mod idt;
 
-use core::{
-    alloc::Layout,
-    arch::{self, asm},
-};
+use core::{alloc::Layout, arch};
 
+use raw_cpuid::CpuId;
 use x86_64::{
     PhysAddr,
     instructions::tlb,
@@ -21,6 +19,43 @@ use crate::{
 };
 
 pub unsafe fn perform_arch_initialization(is_bsp: bool) {
+    let cpu_id = CpuId::new();
+
+    let feature_info = cpu_id
+        .get_feature_info()
+        .expect("Failed to read CPU's feature info");
+    let extended_feature_info = cpu_id
+        .get_extended_feature_info()
+        .expect("Failed to read CPU's extended feature info");
+
+    let extended_feature_ids = cpu_id
+        .get_extended_processor_and_feature_identifiers()
+        .expect("Failed to read CPU's extended feature identifiers");
+
+    if !extended_feature_ids.has_64bit_mode() {
+        panic!("CPU doesn't support x86_64");
+    }
+
+    if !feature_info.has_sse() {
+        panic!("CPU doesn't support SSE");
+    }
+
+    if !feature_info.has_sse2() {
+        panic!("CPU doesn't support SSE2");
+    }
+
+    if !feature_info.has_pge() {
+        panic!("CPU doesn't support PGE");
+    }
+
+    if !extended_feature_info.has_fsgsbase() {
+        panic!("CPU doesn't support FSGSBASE");
+    }
+
+    if !extended_feature_ids.has_execute_disable() {
+        panic!("CPU doesn't support NX/XD");
+    }
+
     unsafe {
         Efer::write(Efer::read() | EferFlags::NO_EXECUTE_ENABLE);
 
@@ -29,12 +64,11 @@ pub unsafe fn perform_arch_initialization(is_bsp: bool) {
                 | Cr0Flags::NUMERIC_ERROR
                 | Cr0Flags::MONITOR_COPROCESSOR,
         );
-        // We don't really need to check whether SSE and SSE2 is present as long mode requires them.
-        // We wouldn't even get here without those extensions.
+
         Cr4::write(
             Cr4::read()
-                | Cr4Flags::PAGE_GLOBAL
                 | Cr4Flags::FSGSBASE
+                | Cr4Flags::PAGE_GLOBAL
                 | Cr4Flags::OSFXSR
                 | Cr4Flags::OSXMMEXCPT_ENABLE,
         );
@@ -47,7 +81,9 @@ pub unsafe fn perform_arch_initialization(is_bsp: bool) {
 
         load_gdt();
 
-        idt::init_idt();
+        if is_bsp {
+            idt::init_idt();
+        }
     }
 }
 
@@ -73,31 +109,6 @@ pub fn use_kernel_page_table(closure: impl FnOnce()) {
 
         tlb::flush_all();
     }
-}
-
-#[inline(always)]
-pub fn disable_interrupts() {
-    unsafe {
-        asm!("cli", options(nomem, nostack, preserves_flags));
-    }
-}
-
-#[inline(always)]
-pub fn enable_interrupts() {
-    unsafe {
-        asm!("sti", options(nomem, nostack, preserves_flags));
-    }
-}
-
-#[inline(always)]
-pub fn read_rsp() -> u64 {
-    let rsp: u64;
-
-    unsafe {
-        asm!("mov {rsp}, rsp", rsp = out(reg) rsp, options(nomem, nostack, preserves_flags));
-    }
-
-    rsp
 }
 
 #[repr(C)]

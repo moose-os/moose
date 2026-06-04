@@ -10,11 +10,11 @@ use x86_64::registers::control::{Cr4, Cr4Flags};
 
 use crate::{
     arch::x86::{
+        asm::{disable_interrupts, enable_interrupts},
         cpu::ProcessorControlBlock,
-        disable_interrupts, enable_interrupts,
-        gdt::{load_gdt, load_tss, setup_tss},
+        gdt::{load_tss, setup_tss},
         idt::IDT,
-        use_kernel_page_table,
+        perform_arch_initialization, use_kernel_page_table,
     },
     kernel::{Kernel, kernel_ref},
     subsystem::{
@@ -66,7 +66,7 @@ pub unsafe extern "C" fn ap_start(apic_processor_id: u64, _kernel_ptr: *const Ke
     disable_interrupts();
 
     unsafe {
-        load_gdt();
+        perform_arch_initialization(false);
 
         ProcessorControlBlock::create_pcb_for_current_processor(apic_processor_id as u16);
     }

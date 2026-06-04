@@ -18,28 +18,18 @@ mod kernel;
 mod panic;
 mod subsystem;
 
-use core::ptr::NonNull;
-
 use raw_cpuid::CpuId;
 
 use crate::{
     arch::x86::{
+        asm::{disable_interrupts, enable_interrupts, read_rsp},
         cpu::ProcessorControlBlock,
-        disable_interrupts, enable_interrupts,
         gdt::{load_tss, setup_tss},
-        read_rsp,
     },
     driver::{acpi::initialize_acpica, apic::LocalApic},
     kernel::kernel_ref,
-    subsystem::{
-        logger::init_logger,
-        memory::{Frame, PageFlags, PageTable, PhysicalAddress, memory_manager},
-        process::DEFAULT_THREAD_PRIORITY,
-        scheduler::Scheduler,
-    },
+    subsystem::{logger::init_logger, process::DEFAULT_THREAD_PRIORITY, scheduler::Scheduler},
 };
-
-const_assert!(size_of::<arch::x86::idt::Idt>() == 256 * 16);
 
 #[unsafe(no_mangle)]
 unsafe extern "C" fn _start() -> ! {
@@ -49,10 +39,10 @@ unsafe extern "C" fn _start() -> ! {
 
     let kernel = kernel_ref();
 
-    kernel.initialize_serial();
-
+    kernel.retrieve_gdt();
     kernel.set_bsp_stack(stack_pointer);
 
+    kernel.initialize_serial();
     // According to the documentation,
     // this can only error out if the logger was previously set,
     // which obviously will never be the case here.
@@ -61,7 +51,9 @@ unsafe extern "C" fn _start() -> ! {
     kernel.gather_boot_context();
 
     let cpu_id = CpuId::new();
-    let feature_info = cpu_id.get_feature_info().expect("...");
+    let feature_info = cpu_id
+        .get_feature_info()
+        .expect("Failed to get CPU's feature info");
 
     unsafe { arch::x86::perform_arch_initialization(true) };
 
@@ -72,8 +64,6 @@ unsafe extern "C" fn _start() -> ! {
         load_tss(0);
     }
 
-    kernel.retrieve_gdt();
-
     kernel.initialize_terminal();
 
     info!("Hello, moose!");
@@ -81,13 +71,12 @@ unsafe extern "C" fn _start() -> ! {
     kernel.allocate_timer_irq();
 
     info!("Initializing PIC...");
-
     kernel.initialize_pic();
 
     info!("Initializing PIT...");
-
     kernel.initialize_pit();
 
+    info!("Initializing ACPICA...");
     unsafe {
         initialize_acpica().expect("ACPICA initialization failed");
 
@@ -97,19 +86,15 @@ unsafe extern "C" fn _start() -> ! {
     }
 
     info!("Initializing ACPI...");
-
     kernel.initialize_acpi();
 
     info!("Initializing APIC...");
-
     kernel.initialize_apic();
 
     info!("Building device tree...");
-
     kernel.build_device_tree();
 
     info!("Initializing local APIC...");
-
     let bsp_lapic = LocalApic::initialize_for_current_processor();
 
     let pcb = ProcessorControlBlock::current();
@@ -117,22 +102,18 @@ unsafe extern "C" fn _start() -> ! {
     _ = pcb.local_apic.set(bsp_lapic);
 
     info!("Initializing devices...");
-
     kernel.initialize_devices();
 
     info!("Spawning kernel processes...");
-
     kernel.initialize_kernel_process();
 
     info!("Enabling application processors...");
-
     kernel
         .apic()
         .read()
         .setup_other_processors(pcb.local_apic());
 
     info!("Spawning test processes...");
-
     spawn_test_processes();
 
     enable_interrupts();
@@ -140,24 +121,7 @@ unsafe extern "C" fn _start() -> ! {
     pcb.local_apic().enable_timer();
 
     info!("Scheduling...");
-
     Scheduler::run();
-}
-
-unsafe fn map_kernel_page_table(kernel_page_table_physical_address: u64) -> NonNull<PageTable> {
-    let page_table_virtual_address = {
-        let mut memory_manager = memory_manager().write();
-
-        unsafe {
-            memory_manager.map_any_for_current_address_space(
-                &Frame::new(PhysicalAddress::new(kernel_page_table_physical_address)),
-                PageFlags::empty(),
-            )
-        }
-        .address()
-    };
-
-    NonNull::new(page_table_virtual_address.as_mut_ptr()).expect("...")
 }
 
 fn spawn_test_processes() {

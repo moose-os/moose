@@ -1,6 +1,31 @@
 use core::arch::asm;
 
-#[inline]
+#[inline(always)]
+pub fn disable_interrupts() {
+    unsafe {
+        asm!("cli", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline(always)]
+pub fn enable_interrupts() {
+    unsafe {
+        asm!("sti", options(nomem, nostack, preserves_flags));
+    }
+}
+
+#[inline(always)]
+pub fn read_rsp() -> u64 {
+    let rsp: u64;
+
+    unsafe {
+        asm!("mov {rsp}, rsp", rsp = out(reg) rsp, options(nomem, nostack, preserves_flags));
+    }
+
+    rsp
+}
+
+#[inline(always)]
 pub fn outb(port: u16, byte: u8) {
     unsafe {
         asm!(
@@ -11,6 +36,7 @@ pub fn outb(port: u16, byte: u8) {
     }
 }
 
+#[inline(always)]
 pub fn inb(port: u16) -> u8 {
     let mut value;
 
@@ -25,7 +51,7 @@ pub fn inb(port: u16) -> u8 {
     value
 }
 
-#[inline]
+#[inline(always)]
 pub fn outw(port: u16, byte: u16) {
     unsafe {
         asm!(
@@ -36,6 +62,7 @@ pub fn outw(port: u16, byte: u16) {
     }
 }
 
+#[inline(always)]
 pub fn inw(port: u16) -> u16 {
     let mut value;
 
@@ -50,7 +77,7 @@ pub fn inw(port: u16) -> u16 {
     value
 }
 
-#[inline]
+#[inline(always)]
 pub fn outl(port: u16, byte: u32) {
     unsafe {
         asm!(
@@ -61,6 +88,7 @@ pub fn outl(port: u16, byte: u32) {
     }
 }
 
+#[inline(always)]
 pub fn inl(port: u16) -> u32 {
     let mut value;
 

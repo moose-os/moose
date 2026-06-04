@@ -15,6 +15,7 @@ use crate::kernel::kernel_ref;
 pub const PAGE_SIZE: usize = 4096;
 pub const FRAME_SIZE: usize = 4096;
 
+#[inline(always)]
 pub fn memory_manager() -> &'static RwLock<MemoryManager> {
     kernel_ref().memory_manager()
 }

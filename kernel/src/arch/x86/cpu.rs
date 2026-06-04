@@ -19,14 +19,12 @@ pub struct ProcessorControlBlock {
 impl ProcessorControlBlock {
     pub unsafe fn create_pcb_for_current_processor(apic_processor_id: u16) {
         let ptr = Box::leak(Box::new(ProcessorControlBlock {
-            apic_processor_id: 0xFFFF,
+            apic_processor_id,
             is_bsp: false,
             local_apic: OnceCell::new(),
         }));
 
         unsafe { GS::write_base(VirtAddr::new(ptr as *mut _ as u64)) };
-
-        ProcessorControlBlock::current().apic_processor_id = apic_processor_id;
     }
 
     // @TODO: SWAPGS

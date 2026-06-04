@@ -23,7 +23,14 @@ use spin::Mutex;
 use super::hid::AcpiHid;
 
 pub type DeviceHandle = Arc<Mutex<Device>>;
-pub type AcpiHandle = ACPI_HANDLE;
+
+pub struct AcpiHandle(ACPI_HANDLE);
+
+// SAFETY: It's always safe to send non-thread local data across thread boundaries.
+unsafe impl Send for AcpiHandle {}
+
+// SAFETY: ACPICA manages synchronization internally.
+unsafe impl Sync for AcpiHandle {}
 
 /// Represents a device in the system, retrieved from the ACPI AML bytecode.
 pub struct Device {
@@ -231,7 +238,7 @@ fn handle_device_object(
     let device = Arc::new(Mutex::new(Device {
         name,
         hid_name: get_device_hardware_id(device_info).map(AcpiHid::new),
-        handle,
+        handle: AcpiHandle(handle),
         parent: context.current.clone(),
         children: Vec::new(),
         methods: Vec::new(),
@@ -267,7 +274,7 @@ fn handle_method_object(
                 Pointer: data.as_ptr() as *mut _,
             };
 
-            let status = unsafe { AcpiGetCurrentResources(device.handle, &mut resources_buffer) };
+            let status = unsafe { AcpiGetCurrentResources(device.handle.0, &mut resources_buffer) };
             assert_eq!(status, AE_OK);
 
             let mut pointer = resources_buffer.Pointer;
@@ -375,7 +382,7 @@ fn handle_method_object(
 
         device.methods.push(Method {
             name,
-            handle,
+            handle: AcpiHandle(handle),
             arg_count: device_info.ParamCount as usize,
         });
     }

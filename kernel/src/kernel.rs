@@ -11,7 +11,7 @@ use x86_64::{
     registers::{
         control::Cr3,
         rflags,
-        segmentation::{Segment64, GS},
+        segmentation::{GS, Segment64},
     },
     structures::DescriptorTablePointer,
 };
@@ -19,10 +19,10 @@ use x86_64::{
 use crate::{
     arch::{
         irq::{IrqAllocator, IrqLevel},
-        x86::{cpu::MAXIMUM_CPU_CORES, gdt::TSS, InterruptStack},
+        x86::{InterruptStack, cpu::MAXIMUM_CPU_CORES, gdt::TSS},
     },
     driver::{
-        acpi::{create_device_list, Acpi, Device},
+        acpi::{Acpi, Device, create_device_list},
         apic::Apic,
         pci::{Pci, PciDevice},
         pic::ProgrammableInterruptController,
@@ -31,16 +31,16 @@ use crate::{
         vga::Vga,
     },
     subsystem::{
-        allocator::{initialize_heap, HEAP_START},
+        allocator::{HEAP_START, initialize_heap},
         boot::limine::LimineBootContext,
         linker::Linker,
         memory::{
-            current_page_table, memory_manager, Frame, FrameAllocator, MemoryManager, Page,
-            PageFlags, PageTable, PhysicalAddress, VirtualAddress, PAGE_SIZE,
+            Frame, FrameAllocator, MemoryManager, PAGE_SIZE, Page, PageFlags, PageTable,
+            PhysicalAddress, VirtualAddress, current_page_table, memory_manager,
         },
         process::{
-            Process, ProcessInner, Registers, Status, Thread, ThreadInner, ThreadStack,
-            HIGHEST_THREAD_PRIORITY,
+            HIGHEST_THREAD_PRIORITY, Process, ProcessInner, Registers, Status, Thread, ThreadInner,
+            ThreadStack,
         },
         scheduler::{self, Scheduler},
         terminal::Terminal,
@@ -600,6 +600,7 @@ pub struct PlatformDevices {
     pub(crate) apic: Once<RwLock<Apic>>,
 }
 
+#[inline(always)]
 pub fn kernel_ref() -> &'static Kernel {
     &KERNEL
 }
