@@ -7,10 +7,10 @@ use core::{
 
 use spin::Mutex;
 use x86_64::{
+    PhysAddr,
     instructions::interrupts,
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{PhysFrame, Size4KiB},
-    PhysAddr,
 };
 
 use crate::{

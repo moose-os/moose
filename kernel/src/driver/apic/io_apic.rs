@@ -4,7 +4,7 @@ use bitfield_struct::bitfield;
 
 use crate::{
     driver::acpi::MadtIoApic,
-    subsystem::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress},
+    subsystem::memory::{MemoryError, Page, PageFlags, VirtualAddress, memory_manager},
 };
 
 const IO_APIC_ID_REGISTER: u32 = 0x00;

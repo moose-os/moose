@@ -7,7 +7,7 @@ use x86_64::instructions::interrupts::without_interrupts;
 use crate::{
     arch::x86::{
         asm::outb,
-        idt::{register_interrupt_handler_closure, ExceptionFrame},
+        idt::{ExceptionFrame, register_interrupt_handler_closure},
     },
     driver::pic::PIC_1_OFFSET,
     kernel::kernel_ref,

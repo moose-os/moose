@@ -1,6 +1,6 @@
 use alloc::{borrow::ToOwned, boxed::Box, fmt, string::String, sync::Arc, vec::Vec};
 use core::{
-    ffi::{c_void, CStr},
+    ffi::{CStr, c_void},
     fmt::{Debug, Formatter},
     ops::Range,
     ptr::null_mut,
@@ -8,15 +8,15 @@ use core::{
 };
 
 use acpica_rs::{
+    AE_OK,
     sys::{
-        AcpiGetCurrentResources, AcpiGetObjectInfo, AcpiWalkNamespace, ACPI_BUFFER,
-        ACPI_DEVICE_INFO, ACPI_HANDLE, ACPI_RESOURCE, ACPI_RESOURCE_TYPE_ADDRESS16,
+        ACPI_BUFFER, ACPI_DEVICE_INFO, ACPI_HANDLE, ACPI_RESOURCE, ACPI_RESOURCE_TYPE_ADDRESS16,
         ACPI_RESOURCE_TYPE_ADDRESS32, ACPI_RESOURCE_TYPE_ADDRESS64, ACPI_RESOURCE_TYPE_DMA,
         ACPI_RESOURCE_TYPE_END_TAG, ACPI_RESOURCE_TYPE_EXTENDED_IRQ,
         ACPI_RESOURCE_TYPE_FIXED_MEMORY32, ACPI_RESOURCE_TYPE_IO, ACPI_RESOURCE_TYPE_IRQ,
         ACPI_RESOURCE_TYPE_VENDOR, ACPI_STATUS, ACPI_TYPE_ANY, ACPI_TYPE_DEVICE, ACPI_TYPE_METHOD,
+        AcpiGetCurrentResources, AcpiGetObjectInfo, AcpiWalkNamespace,
     },
-    AE_OK,
 };
 use spin::Mutex;
 

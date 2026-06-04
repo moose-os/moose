@@ -1,9 +1,9 @@
 use alloc::{vec, vec::Vec};
 
 use deku::{
+    DekuError, DekuRead, DekuReader,
     no_std_io::{Read, Seek},
     reader::Reader,
-    DekuError, DekuRead, DekuReader,
 };
 
 #[derive(DekuRead, Debug, Default)]

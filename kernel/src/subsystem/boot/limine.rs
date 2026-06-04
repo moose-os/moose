@@ -1,4 +1,5 @@
 use limine::{
+    BaseRevision,
     framebuffer::Framebuffer,
     memory_map::Entry,
     paging::Mode,
@@ -6,7 +7,6 @@ use limine::{
         ExecutableAddressRequest, FramebufferRequest, HhdmRequest, MemoryMapRequest,
         PagingModeRequest, RsdpRequest, StackSizeRequest,
     },
-    BaseRevision,
 };
 
 use crate::driver::acpi::Rsdp;

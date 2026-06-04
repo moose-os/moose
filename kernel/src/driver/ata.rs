@@ -2,16 +2,16 @@ use alloc::{borrow::ToOwned, string::String, sync::Arc, vec, vec::Vec};
 use core::{array, cmp::min, mem::transmute};
 
 use deku::{
+    DekuError, DekuRead, DekuReader,
     no_std_io::{Read, Seek},
     reader::Reader,
-    DekuError, DekuRead, DekuReader,
 };
 use spin::Mutex;
 
 use crate::{
     arch::x86::asm::{inb, inw, outb, outl},
     driver::pci::PciDevice,
-    subsystem::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager},
 };
 
 const ATA_PRIMARY_IO_PORT: u16 = 0x1F0;

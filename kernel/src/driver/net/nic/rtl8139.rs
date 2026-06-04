@@ -11,7 +11,7 @@ use crate::{
         x86::{
             asm::{inb, inw, outb, outl, outw},
             cpu::ProcessorControlBlock,
-            idt::{register_interrupt_handler_closure, ExceptionFrame, VolatileRegisters},
+            idt::{ExceptionFrame, VolatileRegisters, register_interrupt_handler_closure},
         },
     },
     driver::{
@@ -20,7 +20,7 @@ use crate::{
     },
     kernel::kernel_ref,
     subsystem::memory::{
-        memory_manager, Frame, Page, PageFlags, PhysicalAddress, VirtualAddress, PAGE_SIZE,
+        Frame, PAGE_SIZE, Page, PageFlags, PhysicalAddress, VirtualAddress, memory_manager,
     },
 };
 

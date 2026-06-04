@@ -14,11 +14,11 @@ use x86_64::instructions::interrupts::without_interrupts;
 use crate::{
     arch::x86::{
         cpu::MAXIMUM_CPU_CORES,
-        idt::{IdtEntry, IDT},
+        idt::{IDT, IdtEntry},
     },
     driver::acpi::MadtEntryInner,
     kernel::kernel_ref,
-    subsystem::memory::{memory_manager, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager},
 };
 
 pub struct Apic {

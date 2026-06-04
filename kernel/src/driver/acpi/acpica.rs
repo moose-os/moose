@@ -6,15 +6,15 @@ use core::{
 };
 
 use acpica_rs::{
-    sys::*, AcpicaOsServices, ACPI_CPU_FLAGS, ACPI_MUTEX, ACPI_SEMAPHORE, ACPI_SPINLOCK,
-    ACPI_THREAD_ID, AE_BAD_PARAMETER, AE_OK,
+    ACPI_CPU_FLAGS, ACPI_MUTEX, ACPI_SEMAPHORE, ACPI_SPINLOCK, ACPI_THREAD_ID, AE_BAD_PARAMETER,
+    AE_OK, AcpicaOsServices, sys::*,
 };
 use libm::ceil;
 
 use crate::{
     arch::x86::asm::{inb, inl, inw, outb, outl, outw},
     driver::pci::Pci,
-    subsystem::memory::{memory_manager, MemoryError, Page, PageFlags, VirtualAddress, PAGE_SIZE},
+    subsystem::memory::{MemoryError, PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager},
 };
 
 struct SizePrefixedAllocation {
