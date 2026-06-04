@@ -56,7 +56,7 @@ impl Terminal {
                 continue;
             }
 
-            if character.is_ascii_graphic() {
+            if !character.is_ascii_control() && !character.is_control() {
                 self.vga.draw_character(
                     self.x,
                     self.y,
