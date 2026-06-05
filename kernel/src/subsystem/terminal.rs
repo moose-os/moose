@@ -1,3 +1,5 @@
+use core::array;
+
 use crate::driver::vga::{Rgb, Vga};
 
 const THREE_BIT_PALETTE: [Rgb; 8] = [
@@ -30,6 +32,11 @@ pub struct Terminal {
 
     foreground_color: Rgb,
     background_color: Rgb,
+
+    in_ansi_sequence: bool,
+    in_control_sequence: bool,
+    sequence_buffer: [char; 16],
+    sequence_buffer_idx: usize,
 }
 
 impl Terminal {
@@ -39,8 +46,12 @@ impl Terminal {
             current_max_width: 0,
             x: 0,
             y: 0,
-            foreground_color: Rgb::new(190, 190, 190),
-            background_color: Rgb::new(0, 0, 0),
+            foreground_color: Rgb::new(204, 204, 204),
+            background_color: Rgb::new(1, 1, 1),
+            in_ansi_sequence: false,
+            in_control_sequence: false,
+            sequence_buffer: [' '; 16],
+            sequence_buffer_idx: 0,
         }
     }
 
@@ -48,59 +59,66 @@ impl Terminal {
         const WIDTH: u64 = 8;
         const HEIGHT: u64 = 16;
 
-        let mut in_ansi_sequence = false;
-        let mut in_control_sequence = false;
-        let mut sequence_buffer = [' '; 16];
-        let mut sequence_buffer_idx = 0;
-
         for character in string.chars() {
             if character == '\x1b' {
-                in_ansi_sequence = true;
+                self.in_ansi_sequence = true;
 
                 continue;
             }
 
-            if in_ansi_sequence {
+            if self.in_ansi_sequence {
                 if character == '[' {
-                    in_control_sequence = true;
+                    self.in_control_sequence = true;
 
                     continue;
                 }
 
-                if in_control_sequence {
+                if self.in_control_sequence {
                     if character != 'm' {
-                        sequence_buffer[sequence_buffer_idx] = character;
-                        sequence_buffer_idx += 1;
+                        self.sequence_buffer[self.sequence_buffer_idx] = character;
+                        self.sequence_buffer_idx += 1;
 
                         continue;
                     } else {
-                        in_ansi_sequence = false;
-                        in_control_sequence = false;
+                        self.in_ansi_sequence = false;
+                        self.in_control_sequence = false;
 
-                        if sequence_buffer == [' '; 16] {
+                        if self.sequence_buffer == [' '; 16] {
                             continue;
                         }
 
-                        let mut sequence = [0u8; 6];
+                        let mut sequence = [0u64; 5];
                         let mut sequence_idx = 0;
 
-                        for character in &sequence_buffer[..sequence_buffer_idx] {
+                        for character in &self.sequence_buffer[..self.sequence_buffer_idx] {
                             if character.is_ascii_whitespace() {
                                 break;
                             }
 
                             if character.is_ascii_digit() {
                                 sequence[sequence_idx] *= 10;
-                                sequence[sequence_idx] += *character as u8 - b'0';
+                                sequence[sequence_idx] += (*character as u8 - b'0') as u64;
                             }
 
                             if *character == ';' {
+                                assert!(sequence[sequence_idx] <= 255);
+
                                 sequence_idx += 1;
                             }
                         }
 
-                        if sequence_buffer_idx != 0 {
+                        let sequence: [u8; 5] = array::from_fn(|idx| sequence[idx] as u8);
+
+                        if self.sequence_buffer_idx != 0 {
                             match sequence[0] {
+                                // Select graphic rendition (SGR)
+
+                                // Reset - all attributes become turned off
+                                0 => {
+                                    self.foreground_color = Rgb::new(204, 204, 204);
+                                    self.background_color = Rgb::new(1, 1, 1);
+                                }
+
                                 // 4 bit
 
                                 // 3 bit foreground color
@@ -127,12 +145,11 @@ impl Terminal {
                                 // foreground color
                                 38 if sequence[1] == 5 => match sequence[2] {
                                     code @ 0..=7 => {
-                                        self.foreground_color =
-                                            THREE_BIT_PALETTE[(code - 30) as usize];
+                                        self.foreground_color = THREE_BIT_PALETTE[code as usize];
                                     }
                                     code @ 8..=15 => {
                                         self.foreground_color =
-                                            THREE_BIT_BRIGHT_PALETTE[(code - 90) as usize];
+                                            THREE_BIT_BRIGHT_PALETTE[(code - 8) as usize];
                                     }
                                     code @ 16..=231 => {
                                         let idx = code - 16;
@@ -151,12 +168,11 @@ impl Terminal {
                                 // background color
                                 48 if sequence[1] == 5 => match sequence[2] {
                                     code @ 0..=7 => {
-                                        self.background_color =
-                                            THREE_BIT_PALETTE[(code - 30) as usize];
+                                        self.background_color = THREE_BIT_PALETTE[code as usize];
                                     }
                                     code @ 8..=15 => {
                                         self.background_color =
-                                            THREE_BIT_BRIGHT_PALETTE[(code - 90) as usize];
+                                            THREE_BIT_BRIGHT_PALETTE[(code - 8) as usize];
                                     }
                                     code @ 16..=231 => {
                                         let idx = code - 16;
@@ -190,8 +206,8 @@ impl Terminal {
                             }
                         }
 
-                        sequence_buffer = [' '; 16];
-                        sequence_buffer_idx = 0;
+                        self.sequence_buffer = [' '; 16];
+                        self.sequence_buffer_idx = 0;
 
                         continue;
                     }
