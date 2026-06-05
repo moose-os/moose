@@ -2,7 +2,7 @@ use core::ptr;
 
 use limine::framebuffer::Framebuffer;
 
-use crate::font::DEFAULT_ASCII_FONT;
+use crate::font::DEFAULT_UNICODE_FONT;
 
 const BITS_PER_PIXEL: u64 = 32;
 const BYTES_PER_PIXEL: u64 = BITS_PER_PIXEL / 8;
@@ -120,57 +120,58 @@ impl Vga {
         assert!((x + 8 * scale) <= framebuffer_width);
         assert!((y + 16 * scale) <= framebuffer_height);
 
-        assert!(character.is_ascii_graphic());
+        assert!(!character.is_ascii_control());
+        assert!(!character.is_control());
 
         self.fill_rectangle(x, y, 8 * scale, 16 * scale, background_color);
 
-        let glyph = &DEFAULT_ASCII_FONT[character as usize];
+        if let Some(glyph) = DEFAULT_UNICODE_FONT.get_glyph(character) {
+            if scale == 1 {
+                for current_y_offset in 0..16 {
+                    let glyph_row = glyph[current_y_offset as usize];
 
-        if scale == 1 {
-            for current_y_offset in 0..16 {
-                let glyph_row = glyph[current_y_offset as usize];
+                    if glyph_row == 0 {
+                        continue;
+                    }
 
-                if glyph_row == 0 {
-                    continue;
-                }
+                    if glyph_row == 0b11111111 {
+                        self.fill_row(x, y + current_y_offset, 8, foreground_color);
 
-                if glyph_row == 0b11111111 {
-                    self.fill_row(x, y + current_y_offset, 8, foreground_color);
+                        continue;
+                    }
 
-                    continue;
-                }
-
-                for current_x_offset in 0..8 {
-                    if (glyph_row >> (7 - (current_x_offset as usize)) & 1) == 1 {
-                        self.put_pixel(
-                            x + current_x_offset,
-                            y + current_y_offset,
-                            foreground_color,
-                        );
+                    for current_x_offset in 0..8 {
+                        if (glyph_row >> (7 - (current_x_offset as usize)) & 1) == 1 {
+                            self.put_pixel(
+                                x + current_x_offset,
+                                y + current_y_offset,
+                                foreground_color,
+                            );
+                        }
                     }
                 }
-            }
-        } else {
-            for current_y_offset in 0..16 * scale {
-                let glyph_row = glyph[(current_y_offset / scale) as usize] as usize;
+            } else {
+                for current_y_offset in 0..16 * scale {
+                    let glyph_row = glyph[(current_y_offset / scale) as usize] as usize;
 
-                if glyph_row == 0 {
-                    continue;
-                }
+                    if glyph_row == 0 {
+                        continue;
+                    }
 
-                if glyph_row == 0xFF {
-                    self.fill_row(x, y + current_y_offset, 8 * scale, foreground_color);
+                    if glyph_row == 0xFF {
+                        self.fill_row(x, y + current_y_offset, 8 * scale, foreground_color);
 
-                    continue;
-                }
+                        continue;
+                    }
 
-                for current_x_offset in 0..8 * scale {
-                    if (glyph_row >> (7 - ((current_x_offset / scale) as usize)) & 1) == 1 {
-                        self.put_pixel(
-                            x + current_x_offset,
-                            y + current_y_offset,
-                            foreground_color,
-                        );
+                    for current_x_offset in 0..8 * scale {
+                        if (glyph_row >> (7 - ((current_x_offset / scale) as usize)) & 1) == 1 {
+                            self.put_pixel(
+                                x + current_x_offset,
+                                y + current_y_offset,
+                                foreground_color,
+                            );
+                        }
                     }
                 }
             }
