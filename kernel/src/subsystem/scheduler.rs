@@ -1,9 +1,5 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::{
-    arch::{asm, naked_asm},
-    mem,
-    sync::atomic::Ordering,
-};
+use core::{arch::asm, mem, sync::atomic::Ordering};
 
 use spin::Mutex;
 use x86_64::{
@@ -14,8 +10,12 @@ use x86_64::{
 };
 
 use crate::{
+    arch::x86::{cpu::ProcessorControlBlock, idt::YIELD_IRQ},
     kernel::kernel_ref,
-    subsystem::process::{Registers, Status, Thread, ThreadStack},
+    subsystem::{
+        clock::{time::Duration, timer::TimerAction},
+        process::{Registers, Status, Thread, ThreadStack},
+    },
 };
 
 pub const PRIORITIES_NUM: usize = 16;
@@ -38,6 +38,22 @@ impl Scheduler {
 
 impl Scheduler {
     pub fn run() -> ! {
+        // Spawn periodic task responsible for preemption
+        let nanos_since_boot = kernel_ref().clock().monotonic_ns();
+        let next_wakeup = Duration::from_millis(500).as_nanos();
+
+        let expires = nanos_since_boot + next_wakeup;
+
+        ProcessorControlBlock::current()
+            .hr_timers
+            .get_mut()
+            .add_timer(
+                expires,
+                true,
+                Some(Duration::from_millis(500)),
+                TimerAction::Reschedule,
+            );
+
         loop {
             // Find new thread to execute.
             //
@@ -97,49 +113,25 @@ impl Scheduler {
     }
 }
 
-/// Manually triggers a context switch by simulating a hardware timer interrupt.
+/// Manually triggers a context switch by simulating a software-induced interrupt.
 ///
-/// This function is used for cooperative multitasking. It allows a thread (especially kernel mode thread)
-/// to voluntarily give up its remaining time slice and return control to the scheduler.
+/// This function is used for cooperative multitasking, allowing a thread
+/// to voluntarily relinquish its remaining time slice and return control
+/// to the scheduler.
 ///
-/// ### Mechanism
-/// Since the system's interrupt handler (`raw_timer_interrupt_handler`) expects the CPU
-/// to have pushed an **Interrupt Stack Frame** (due to a hardware event), this function
-/// manually constructs that frame on the current stack before jumping to the handler.
-/// It's the easiest solution possible.
+/// When `INT YIELD_IRQ` is executed:
+/// 1. The CPU automatically pushes the current Interrupt Stack Frame
+///    (SS, RSP, RFLAGS, CS, and RIP) onto the stack.
+/// 2. The CPU jumps to the interrupt handler registered for `YIELD_IRQ`.
+/// 3. The handler executes the scheduling logic and switches the context.
 ///
-/// The constructed stack frame follows the x86_64 ABI requirements for an `IRETQ` instruction:
-///
-/// | Value      | Description                                                |
-/// | :--------- | :--------------------------------------------------------- |
-/// | **SS**     | Stack Segment selector                                     |
-/// | **RSP**    | Stack Pointer (pointing to the instruction after the call) |
-/// | **RFLAGS** | Processor flags (captured at the moment of call)           |
-/// | **CS**     | Code Segment selector                                      |
-/// | **RIP**    | Instruction Pointer (the return address)                   |
-///
-#[unsafe(naked)]
 pub extern "C" fn yield_to_scheduler() {
-    naked_asm!(
-        "mov rcx, [rsp]",
-
-        "pushfq",
-        "pop rax",
-
-        "lea rdx, [rsp + 8]",
-
-        "mov r8, ss",
-        "push r8",         // SS
-        "push rdx",        // RSP
-        "push rax",        // RFLAGS
-        "mov r8, cs",
-        "push r8",         // CS
-        "push rcx",        // RIP
-
-        "jmp {raw_handler}",
-
-        raw_handler = sym crate::driver::apic::raw_timer_interrupt_handler,
-    )
+    unsafe {
+        asm!(
+            "int {irq}",
+            irq = const YIELD_IRQ,
+        )
+    }
 }
 
 #[derive(Clone)]
@@ -183,6 +175,10 @@ pub fn current_thread() -> Thread {
         .clone()
 }
 
+pub fn has_current_thread() -> bool {
+    kernel_ref().scheduler.current_thread.lock().is_some()
+}
+
 pub fn schedule(thread: Thread) {
     match thread.status() {
         Status::Running => {}
@@ -210,6 +206,10 @@ pub fn run(registers: *mut Registers) {
     schedule_next_thread();
     restore_registers(registers);
 
+    switch_to_current_thread_page_table();
+}
+
+fn switch_to_current_thread_page_table() {
     let current_thread = current_thread();
     let current_process = current_thread.process();
 

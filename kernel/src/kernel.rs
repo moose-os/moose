@@ -1,13 +1,14 @@
-use alloc::{boxed::Box, collections::VecDeque, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use core::{
     ffi::c_void,
     mem,
     ptr::NonNull,
-    sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
+    sync::atomic::{AtomicBool, AtomicUsize, Ordering},
 };
 
 use spin::{Mutex, Once, RwLock};
 use x86_64::{
+    instructions::hlt,
     registers::{
         control::Cr3,
         rflags,
@@ -17,27 +18,30 @@ use x86_64::{
 };
 
 use crate::{
-    arch::irq::{IrqAllocator, IrqLevel},
+    arch::{
+        irq::IrqAllocator,
+        x86::{InterruptStack, cpu::MAXIMUM_CPU_CORES, gdt::TSS, idt::TIMER_IRQ},
+    },
     driver::{
-        acpi::{Acpi, Device, create_device_list},
+        acpi::{Acpi, Device, MadtEntryInner, create_device_list},
         apic::Apic,
         pci::{Pci, PciDevice},
         pic::ProgrammableInterruptController,
-        pit::ProgrammableIntervalTimer,
         serial::{Serial, SerialPort},
         vga::Vga,
     },
     subsystem::{
         allocator::initialize_heap,
         boot::limine::LimineBootContext,
+        clock::system_clock::SystemClock,
         linker::Linker,
         memory::{
             AddressSpace, Exact, Frame, FrameAllocator, MemoryManager, PAGE_SIZE, Page, PageFlags,
             PageTable, VirtualAddress, memory_manager,
         },
         process::{
-            HIGHEST_THREAD_PRIORITY, Process, ProcessInner, Registers, Status, Thread, ThreadInner,
-            ThreadStack,
+            HIGHEST_THREAD_PRIORITY, LOWEST_THREAD_PRIORITY, Process, ProcessInner, Registers,
+            Status, Thread, ThreadInner, ThreadStack,
         },
         scheduler::{self, Scheduler},
         terminal::Terminal,
@@ -65,21 +69,13 @@ pub struct Kernel {
 
     pub terminal: Once<Mutex<Terminal>>,
 
-    pub timer_irq: Once<u8>,
-    pub ticks: AtomicU64,
+    pub clock: Once<SystemClock>,
 
     current_usable_process_id: AtomicUsize,
     current_usable_thread_id: AtomicUsize,
-    processes: RwLock<Vec<Process>>,
+    pub processes: RwLock<Vec<Process>>,
 
     pub scheduler: Scheduler,
-    /// A global queue for threads waiting on a timed sleep or timeout.
-    ///
-    /// ### Data Structure:
-    /// Entry in the vector is a tuple of `(usize, Thread)`:
-    /// * `usize`: The absolute tick count at which the timeout expires.
-    /// * `Thread`: The handle or descriptor of the thread to be woken up.
-    pub timeout_queue: Mutex<VecDeque<(u64, Thread)>>,
 }
 
 unsafe impl Send for Kernel {}
@@ -105,7 +101,6 @@ impl Kernel {
             platform_devices: PlatformDevices {
                 serial: Once::new(),
                 pic: Mutex::new(ProgrammableInterruptController::new()),
-                pit: RwLock::new(ProgrammableIntervalTimer::new()),
                 acpi: Once::new(),
                 apic: Once::new(),
             },
@@ -114,15 +109,13 @@ impl Kernel {
 
             terminal: Once::new(),
 
-            timer_irq: Once::new(),
-            ticks: AtomicU64::new(0),
+            clock: Once::new(),
 
             current_usable_process_id: AtomicUsize::new(0),
             current_usable_thread_id: AtomicUsize::new(0),
             processes: RwLock::new(Vec::new()),
 
             scheduler: Scheduler::new(),
-            timeout_queue: Mutex::new(VecDeque::new()),
         }
     }
 
@@ -186,11 +179,6 @@ impl Kernel {
             .call_once(|| Mutex::new(Terminal::new(Vga::new(&self.boot_context().framebuffer))));
     }
 
-    pub(crate) fn allocate_timer_irq(&self) {
-        self.timer_irq
-            .call_once(|| self.irq_allocator.lock().allocate_irq(IrqLevel::Clock));
-    }
-
     pub(crate) fn set_bsp_stack(&self, stack_pointer: u64) {
         self.bsp_stack.call_once(|| stack_pointer);
     }
@@ -198,11 +186,6 @@ impl Kernel {
     #[inline(always)]
     pub(crate) fn initialize_pic(&self) {
         self.platform_devices.pic.lock().initialize();
-    }
-
-    #[inline(always)]
-    pub(crate) fn initialize_pit(&self) {
-        self.platform_devices.pit.write().initialize();
     }
 
     #[inline(always)]
@@ -216,12 +199,16 @@ impl Kernel {
     pub(crate) fn initialize_apic(&self) {
         self.platform_devices
             .apic
-            .call_once(|| RwLock::new(Apic::initialize(self.timer_irq())));
+            .call_once(|| RwLock::new(Apic::initialize(TIMER_IRQ)));
     }
 
     pub(crate) fn build_device_tree(&self) {
         *self.devices.lock() = create_device_list();
         *self.pci_devices.lock() = Pci::build_device_tree();
+    }
+
+    pub(crate) fn initialize_clock(&self) {
+        self.clock.call_once(SystemClock::new);
     }
 
     pub(crate) fn initialize_devices(&self) {
@@ -249,6 +236,26 @@ impl Kernel {
             page_table_physical_address,
             threads: Mutex::new(Vec::new()),
         })));
+
+        drop(processes);
+
+        let cpu_core_count = self
+            .acpi()
+            .madt
+            .entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    &entry.inner,
+                    MadtEntryInner::ProcessorLocalApic(_local_apic)
+                )
+            })
+            .count();
+
+        // Spawn separate idle thread for every CPU
+        for _ in 0..cpu_core_count {
+            let _ = self.spawn_kernel_thread(idle_thread, LOWEST_THREAD_PRIORITY);
+        }
     }
 
     // |-------------------------------|
@@ -378,7 +385,7 @@ impl Kernel {
                 cs: (5 << 3),
                 ss: (6 << 3),
                 gs: GS::read_base().as_u64(),
-                rflags: rflags::read_raw(),
+                rflags: rflags::read_raw() | (1 << 9), // IF=1, enable interrupts in new thread regardless current CPU state
                 ..Default::default()
             }),
             stack,
@@ -423,6 +430,13 @@ impl Kernel {
     }
 
     #[inline(always)]
+    pub fn clock(&self) -> &SystemClock {
+        self.clock
+            .get()
+            .expect("clock was accessed before being initialized")
+    }
+
+    #[inline(always)]
     pub fn memory_manager(&self) -> &RwLock<MemoryManager> {
         self.memory_manager
             .get()
@@ -440,11 +454,6 @@ impl Kernel {
     #[inline(always)]
     pub fn pic(&self) -> &Mutex<ProgrammableInterruptController> {
         &self.platform_devices.pic
-    }
-
-    #[inline(always)]
-    pub fn pit(&self) -> &RwLock<ProgrammableIntervalTimer> {
-        &self.platform_devices.pit
     }
 
     #[inline(always)]
@@ -486,20 +495,11 @@ impl Kernel {
             .get()
             .expect("bsp_stack was accessed before being initialized")
     }
-
-    #[inline(always)]
-    pub fn timer_irq(&self) -> u8 {
-        *self
-            .timer_irq
-            .get()
-            .expect("timer_irq was accessed before being initialized")
-    }
 }
 
 pub struct PlatformDevices {
     pub(crate) serial: Once<Mutex<Serial>>,
     pub(crate) pic: Mutex<ProgrammableInterruptController>,
-    pub(crate) pit: RwLock<ProgrammableIntervalTimer>,
     pub(crate) acpi: Once<Acpi>,
     pub(crate) apic: Once<RwLock<Apic>>,
 }
@@ -507,4 +507,10 @@ pub struct PlatformDevices {
 #[inline(always)]
 pub fn kernel_ref() -> &'static Kernel {
     &KERNEL
+}
+
+extern "C" fn idle_thread() -> ! {
+    loop {
+        hlt();
+    }
 }

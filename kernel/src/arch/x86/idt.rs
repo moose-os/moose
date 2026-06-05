@@ -5,7 +5,7 @@ use bitfield_struct::bitfield;
 use spin::Mutex;
 use x86_64::registers::control::Cr2;
 
-use crate::subsystem::syscall::write_syscall;
+use crate::driver::apic::raw_syscall_interrupt_handler;
 
 use super::gdt::KERNEL_MODE_CODE_SEGMENT_INDEX;
 
@@ -19,7 +19,17 @@ static mut REGISTERED_INTERRUPT_HANDLERS: [Vec<ExceptionHandler>; 224] = {
     [DEFAULT; 224]
 };
 
-const SYSCALL_IRQ: u8 = 0x80;
+/// IRQ number used for performing slow system calls (int 80h)
+pub const SYSCALL_IRQ: u8 = 0x80;
+
+/// IRQ number used for timer interrupts
+pub const TIMER_IRQ: u8 = 13 << 4;
+
+/// IRQ number used for task yielding.
+///
+/// This interrupt is triggered when a thread voluntarily yields the CPU. It needs
+/// to be lower priority than [`TIMER_IRQ`].
+pub const YIELD_IRQ: u8 = TIMER_IRQ - 1;
 
 macro_rules! register_indexed_interrupt_handlers {
     ($idt:expr, $($idx:literal),* $(,)?) => {
@@ -171,9 +181,11 @@ pub fn init_idt() {
         221, 222, 223
     );
 
-    idt.interrupts[SYSCALL_IRQ as usize - 32] = IdtEntry::kernel_mode_ring3_accessible_interrupt(
-        generate_exception_handler_stub_addr!(syscall_handler),
-    );
+    idt.interrupts[SYSCALL_IRQ as usize - 32] =
+        IdtEntry::kernel_mode_ring3_accessible_interrupt_with_ist(
+            raw_syscall_interrupt_handler as *const () as u64,
+            3,
+        );
 
     unsafe {
         idt.load();
@@ -330,9 +342,24 @@ impl IdtEntry {
                 .with_present(true),
         )
     }
+
+    pub const fn kernel_mode_ring3_accessible_interrupt_with_ist(offset: u64, ist: u8) -> Self {
+        let mut entry = Self::new(
+            offset,
+            (KERNEL_MODE_CODE_SEGMENT_INDEX as u16) << 3,
+            IdtAttributes::new()
+                .with_kind(GateKind::Interrupt)
+                .with_privilege_level(PrivilegeLevel::Ring3)
+                .with_present(true),
+        );
+
+        entry.interrupt_stack_table_offset = InterruptStackTableOffset(ist);
+
+        entry
+    }
 }
 
-impl const Default for IdtEntry {
+const impl Default for IdtEntry {
     fn default() -> Self {
         Self::new(
             0,
@@ -766,25 +793,6 @@ extern "C" fn security_exception_handler(
 
     loop {
         x86_64::instructions::hlt();
-    }
-}
-
-extern "C" fn syscall_handler(_frame: &ExceptionFrame, registers: &VolatileRegisters) {
-    let rax = registers.rax as u64;
-    let rdi = registers.rdi as u64;
-    let rsi = registers.rsi as u64;
-    let rdx = registers.rdx as u64;
-    let _r10 = registers.r10 as u64;
-    let _r8 = registers.r8 as u64;
-    let _r9 = registers.r9 as u64;
-
-    let id = rax;
-
-    match id {
-        1 => {
-            write_syscall(rdi, rsi as *const u8, rdx);
-        }
-        _ => unimplemented!(),
     }
 }
 

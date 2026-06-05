@@ -4,8 +4,10 @@ use core::{alloc::Layout, ffi::c_void, sync::atomic::AtomicBool};
 use spin::{Mutex, MutexGuard, Spin};
 
 use crate::{
+    arch::x86::cpu::ProcessorControlBlock,
     kernel::kernel_ref,
     subsystem::{
+        clock::{time::Duration, timer::TimerAction},
         memory::PageTable,
         scheduler::{self, PRIORITIES_NUM},
     },
@@ -85,27 +87,24 @@ impl Thread {
     }
 
     pub fn sleep(&self, time_in_ms: usize) {
-        // Need to convert relative time in miliseconds to absolute kernel tick count
-        let sleep_time_in_ticks = time_in_ms as u64 / kernel_ref().apic().read().ms_per_tick;
-        let expiration_time = kernel_ref()
-            .ticks
-            .load(core::sync::atomic::Ordering::SeqCst)
-            + sleep_time_in_ticks;
+        let nanos_since_boot = kernel_ref().clock().monotonic_ns();
+        let sleep_in_nanos = Duration::from_millis(time_in_ms as u64).as_nanos();
 
-        // Insert thread to TIMEOUT_QUEUE and change its status to Status::Waiting
-        {
-            let mut queue = kernel_ref().timeout_queue.lock();
+        let expires = nanos_since_boot + sleep_in_nanos;
 
-            // Find the correct position for the new timeout.
-            // If multiple threads have the same expiration, this inserts after them.
-            let position = queue
-                .binary_search_by(|(expiration_tick_count, _)| {
-                    expiration_tick_count.cmp(&expiration_time)
-                })
-                .unwrap_or_else(|e| e);
-
-            queue.insert(position, (expiration_time, self.clone()));
-        }
+        // @TODO: Better timers distribution?
+        let _ = ProcessorControlBlock::current()
+            .hr_timers
+            .get_mut()
+            .add_timer(
+                expires,
+                false,
+                None,
+                TimerAction::WakeUp {
+                    process_id: self.process().id(),
+                    thread_id: self.id(),
+                },
+            );
 
         self.set_status(Status::Waiting);
     }
@@ -161,7 +160,7 @@ impl ThreadStack {
 }
 
 #[derive(Clone, Debug, Default)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct Registers {
     pub(crate) rax: u64,
     pub(crate) rbx: u64,
@@ -181,8 +180,9 @@ pub struct Registers {
     pub(crate) r15: u64,
     pub(crate) rip: u64,
     pub(crate) rflags: u64,
-    pub(crate) cs: u16,
-    pub(crate) ss: u16,
+    pub(crate) cs: u64,
+    pub(crate) ss: u64,
     pub(crate) fs: u64,
     pub(crate) gs: u64,
+    pub(crate) padding_: u64,
 }

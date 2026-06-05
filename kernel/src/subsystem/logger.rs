@@ -3,7 +3,7 @@ use core::fmt::Write;
 use log::{Level, LevelFilter, Log, SetLoggerError};
 use x86_64::instructions::interrupts;
 
-use crate::kernel::kernel_ref;
+use crate::{kernel::kernel_ref, subsystem::clock::time::LoggerTime};
 
 static BOOT_LOGGER: BootLogger = BootLogger;
 

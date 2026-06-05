@@ -5,7 +5,7 @@ pub use io_apic::*;
 pub use local_apic::*;
 
 use alloc::{alloc::alloc_zeroed, vec::Vec};
-use core::{alloc::Layout, arch::asm, ptr};
+use core::{alloc::Layout, arch::asm, hint::spin_loop, ptr};
 
 use raw_cpuid::CpuId;
 use spin::Mutex;
@@ -24,7 +24,6 @@ use crate::{
 };
 
 pub struct Apic {
-    pub local_apic_timer_ticks_per_second: u64,
     pub ms_per_tick: u64,
     io_apics: Vec<Mutex<IoApic>>,
 }
@@ -41,8 +40,17 @@ impl Apic {
         unsafe {
             IDT.lock().set_interrupt_entry(
                 timer_irq as usize - 32,
-                IdtEntry::kernel_mode_ring3_accessible_interrupt(
+                IdtEntry::kernel_mode_ring3_accessible_interrupt_with_ist(
                     raw_timer_interrupt_handler as *const () as u64,
+                    1,
+                ),
+            );
+
+            IDT.lock().set_interrupt_entry(
+                timer_irq as usize - 1 - 32,
+                IdtEntry::kernel_mode_ring3_accessible_interrupt_with_ist(
+                    raw_yield_handler as *const () as u64,
+                    2,
                 ),
             );
         }
@@ -60,7 +68,6 @@ impl Apic {
             .collect();
 
         Apic {
-            local_apic_timer_ticks_per_second: 0,
             ms_per_tick: 0,
             io_apics,
         }
@@ -198,7 +205,7 @@ impl Apic {
                 self.boot_processor(local_apic, entry.apic_id);
 
                 while without_interrupts(|| *AP_STARTUP_SPINLOCK.read() == 0) {
-                    kernel_ref().pit().read().wait_sixteen_millis();
+                    spin_loop();
                 }
             });
     }
@@ -263,8 +270,9 @@ impl Apic {
 
         // Wait for the processor to execute BIOS code
         //
-        // We should wait for approx 10ms, but because of low-resolution PIT usage we'll wait ~16ms
-        kernel_ref().pit().read().wait_sixteen_millis();
+        // We should wait for approx 10ms.
+        //
+        // @TODO: Check if we need to wait here
 
         // Finally, send STARTUP IPI
         //
@@ -285,7 +293,7 @@ impl Apic {
                     | 0x608,
             );
 
-            kernel_ref().pit().read().wait_sixteen_millis();
+            // @TODO: Check if we need to wait here
         }
     }
 }

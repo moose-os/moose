@@ -68,13 +68,8 @@ unsafe extern "C" fn _start() -> ! {
 
     info!("Hello, moose!");
 
-    kernel.allocate_timer_irq();
-
     info!("Initializing PIC...");
     kernel.initialize_pic();
-
-    info!("Initializing PIT...");
-    kernel.initialize_pit();
 
     info!("Initializing ACPICA...");
     unsafe {
@@ -101,6 +96,9 @@ unsafe extern "C" fn _start() -> ! {
     pcb.is_bsp = true;
     _ = pcb.local_apic.set(bsp_lapic);
 
+    info!("Initializing clock...");
+    kernel.initialize_clock();
+
     info!("Initializing devices...");
     kernel.initialize_devices();
 
@@ -117,8 +115,6 @@ unsafe extern "C" fn _start() -> ! {
     spawn_test_processes();
 
     enable_interrupts();
-
-    pcb.local_apic().enable_timer();
 
     info!("Scheduling...");
     Scheduler::run();
