@@ -53,7 +53,7 @@ impl Pci {
         };
 
         debug!(
-            "[PCI] Found new device: {:#x?}:{:#x?} (class: {:?}, vendor: {}, device: {})",
+            "Found new device: {:#x?}:{:#x?} (class: {:?}, vendor: {}, device: {})",
             vendor_id,
             device_id,
             device.class,
