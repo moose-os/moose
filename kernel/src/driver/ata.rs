@@ -11,7 +11,9 @@ use spin::Mutex;
 use crate::{
     arch::x86::asm::{inb, inw, outb, outl},
     driver::pci::PciDevice,
-    subsystem::memory::{PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager},
+    subsystem::memory::{
+        CurrentAddressSpace, Identity, PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager,
+    },
 };
 
 const ATA_PRIMARY_IO_PORT: u16 = 0x1F0;
@@ -416,8 +418,9 @@ impl Ata {
 
             unsafe {
                 memory_manager
-                    .map_identity_for_current_address_space(
-                        &Page::new(VirtualAddress::new(frame)),
+                    .map(
+                        CurrentAddressSpace,
+                        Identity(&Page::new(VirtualAddress::new(frame))),
                         PageFlags::WRITABLE | PageFlags::DISABLE_CACHING,
                     )
                     .unwrap();

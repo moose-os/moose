@@ -18,7 +18,9 @@ use crate::{
     },
     driver::acpi::MadtEntryInner,
     kernel::kernel_ref,
-    subsystem::memory::{PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager},
+    subsystem::memory::{
+        CurrentAddressSpace, Identity, PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager,
+    },
 };
 
 pub struct Apic {
@@ -91,8 +93,9 @@ impl Apic {
             let mut memory_manager = memory_manager().write();
 
             memory_manager
-                .map_identity_for_current_address_space(
-                    &Page::new(VirtualAddress::new(0x8000)),
+                .map(
+                    CurrentAddressSpace,
+                    Identity(&Page::new(VirtualAddress::new(0x8000))),
                     PageFlags::WRITABLE | PageFlags::EXECUTABLE,
                 )
                 .unwrap();

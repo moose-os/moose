@@ -18,7 +18,10 @@ use crate::{
     },
     kernel::{Kernel, kernel_ref},
     subsystem::{
-        memory::{MemoryError, Page, PageFlags, VirtualAddress, memory_manager},
+        memory::{
+            CurrentAddressSpace, Identity, MemoryError, Page, PageFlags, VirtualAddress,
+            memory_manager,
+        },
         process::{Registers, Status},
         scheduler,
     },
@@ -113,13 +116,16 @@ impl LocalApic {
         {
             let mut memory_manager = memory_manager().write();
 
+            let local_apic_base_page = Page::new(VirtualAddress::new(local_apic_base));
+
             match unsafe {
-                memory_manager.map_identity_for_current_address_space(
-                    &Page::new(VirtualAddress::new(local_apic_base)),
+                memory_manager.map(
+                    CurrentAddressSpace,
+                    Identity(&local_apic_base_page),
                     PageFlags::WRITABLE | PageFlags::WRITE_THROUGH | PageFlags::DISABLE_CACHING,
                 )
             } {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(MemoryError::AlreadyMapped) => {}
                 Err(err) => {
                     panic!("{}", err);

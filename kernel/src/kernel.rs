@@ -35,8 +35,9 @@ use crate::{
         boot::limine::LimineBootContext,
         linker::Linker,
         memory::{
-            Frame, FrameAllocator, MemoryManager, PAGE_SIZE, Page, PageFlags, PageTable,
-            PhysicalAddress, VirtualAddress, current_page_table, memory_manager,
+            AddressSpace, Any, CurrentAddressSpace, Exact, Frame, FrameAllocator, MemoryManager,
+            PAGE_SIZE, Page, PageFlags, PageTable, PhysicalAddress, VirtualAddress,
+            current_page_table, memory_manager,
         },
         process::{
             HIGHEST_THREAD_PRIORITY, Process, ProcessInner, Registers, Status, Thread, ThreadInner,
@@ -155,15 +156,14 @@ impl Kernel {
         let page_table_virtual_address = {
             let mut memory_manager = memory_manager().write();
 
-            unsafe {
-                memory_manager.map_any_for_current_address_space(
-                    &Frame::new(PhysicalAddress::new(
-                        self.kernel_page_table_physical_address(),
-                    )),
-                    PageFlags::empty(),
-                )
-            }
-            .address()
+            let frame = Frame::new(PhysicalAddress::new(
+                self.kernel_page_table_physical_address(),
+            ));
+
+            unsafe { memory_manager.map(CurrentAddressSpace, Any(&frame), PageFlags::empty()) }
+                .unwrap()
+                .page
+                .address()
         };
 
         self.kernel_page_table.call_once(|| {
@@ -303,14 +303,19 @@ impl Kernel {
 
                 unsafe {
                     memory_manager
-                        .unmap(&mut *program_page_table, &Page::new(stack_virtual_address))
+                        .unmap(
+                            AddressSpace(&mut *program_page_table),
+                            &Page::new(stack_virtual_address),
+                        )
                         .unwrap();
 
                     memory_manager
                         .map(
-                            &mut *program_page_table,
-                            &Page::new(stack_virtual_address),
-                            &Frame::new(stack_physical_address),
+                            AddressSpace(&mut *program_page_table),
+                            Exact(
+                                &Page::new(stack_virtual_address),
+                                &Frame::new(stack_physical_address),
+                            ),
                             PageFlags::USER_MODE_ACCESSIBLE | PageFlags::WRITABLE,
                         )
                         .unwrap();
@@ -486,16 +491,18 @@ impl Kernel {
                     unsafe {
                         memory_manager
                             .unmap(
-                                &mut *page_table,
+                                AddressSpace(&mut *page_table),
                                 &Page::new(interrupt_stack_virtual_address),
                             )
                             .unwrap();
 
                         memory_manager
                             .map(
-                                &mut *page_table,
-                                &Page::new(interrupt_stack_virtual_address),
-                                &Frame::new(interrupt_stack_physical_address),
+                                AddressSpace(&mut *page_table),
+                                Exact(
+                                    &Page::new(interrupt_stack_virtual_address),
+                                    &Frame::new(interrupt_stack_physical_address),
+                                ),
                                 PageFlags::WRITABLE,
                             )
                             .unwrap();
