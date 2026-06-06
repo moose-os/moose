@@ -86,9 +86,9 @@ impl Thread {
         }
     }
 
-    pub fn sleep(&self, time_in_ms: usize) {
+    pub fn sleep(&self, duration: Duration) {
         let nanos_since_boot = kernel_ref().clock().monotonic_ns();
-        let sleep_in_nanos = Duration::from_millis(time_in_ms as u64).as_nanos();
+        let sleep_in_nanos = duration.as_nanos();
 
         let expires = nanos_since_boot + sleep_in_nanos;
 

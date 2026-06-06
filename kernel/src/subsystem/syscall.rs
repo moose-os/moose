@@ -1,6 +1,9 @@
 use core::{ffi::CStr, ptr};
 
-use crate::{arch::x86::use_kernel_page_table, subsystem::scheduler::current_thread};
+use crate::{
+    arch::x86::use_kernel_page_table,
+    subsystem::{clock::time::Duration, scheduler::current_thread},
+};
 
 pub extern "C" fn write_syscall(descriptor: u64, buffer: *const u8, count: u64) {
     info!("sys_write ({descriptor}, {buffer:p}, {count})");
@@ -21,6 +24,6 @@ pub extern "C" fn write_syscall(descriptor: u64, buffer: *const u8, count: u64) 
                 .to_string_lossy()
         );
 
-        current_thread().sleep(500);
+        current_thread().sleep(Duration::from_millis(500));
     });
 }
