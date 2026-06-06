@@ -1,5 +1,5 @@
 use bitvec::prelude::*;
-use bytemuck::{cast, cast_slice, cast_slice_mut};
+use bytemuck::{cast, cast_slice_mut};
 use chrono::NaiveDateTime;
 use deku::DekuWrite;
 use std::{
@@ -10,24 +10,125 @@ use std::{
 };
 
 use super::{
-    directory::FatDirectory, file::FatFile, BiosParameterBlock, FatDataSource, FatEntry,
-    FatTimeSource, FileListing, RawFatFileEntry, Sector,
+    BiosParameterBlock, FatDataSource, FatEntry, FatTimeSource, FileListing, RawFatFileEntry,
+    Sector, directory::FatDirectory, file::FatFile,
 };
 use crate::{
-    fat32::{FatFileAttributes, FatFileEntry, RawFileListing, FAT_SECTOR_SIZE},
     FileSystem, FileSystemError,
+    fat32::{FAT_SECTOR_SIZE, FatFileAttributes, FatFileEntry, RawFileListing},
 };
 
 pub const FAT_FREE_SECTOR: u32 = 0x00;
 pub const FAT_END_OF_FILE_MARK: u32 = 0xFFFFFFFF;
 const FAT_FREE_ENTRY: u8 = 0xE5;
+const FAT32_ENTRIES_PER_SECTOR: u32 = (FAT_SECTOR_SIZE / 4) as u32;
+
+/// One-sector cache for on-demand FAT table reads.
+///
+/// [`read_fat_entry`] loads a single FAT sector from the backing store only when the
+/// requested entry lies in a different sector than the one already cached. Sequential
+/// reads within the same sector  reuse [`Self::data`] without another I/O round-trip.
+struct FatSectorCache {
+    /// LBA of the FAT sector currently held in [`Self::data`], or [`None`] if empty.
+    sector_lba: Option<u32>,
+
+    /// Raw contents of the cached FAT sector.
+    data: Sector,
+}
+
+impl FatSectorCache {
+    const fn empty() -> Self {
+        Self {
+            sector_lba: None,
+            data: [0u8; FAT_SECTOR_SIZE],
+        }
+    }
+}
+
+/// Iterator over the cluster numbers in a file's FAT chain.
+///
+/// Each [`Iterator::next`] yields the current cluster and reads the following FAT entry
+/// to discover the next one. The full FAT is never loaded into memory: each step calls
+/// [`Fat::read_fat_entry`], which uses [`FatSectorCache`] to avoid re-reading the same
+/// FAT sector on disk.
+///
+/// The chain ends when the next link is an end-of-chain marker (`>= 0x0FFFFFF8`); the
+/// iterator then returns [`None`].
+pub struct ClusterChainIter<'a> {
+    /// Filesystem used to read FAT entries from the backing store.
+    fat: &'a Fat,
+
+    /// Next cluster to yield, or [`None`] after the chain ends or on error.
+    next: Option<u32>,
+
+    /// Sector cache reused across [`Fat::read_fat_entry`] calls within this walk.
+    cache: FatSectorCache,
+}
+
+impl<'a> Iterator for ClusterChainIter<'a> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let current = self.next?;
+        let link = self.fat.read_fat_entry(current, &mut self.cache).ok()?;
+        self.next = if link >= 0x0FFFFFF8 { None } else { Some(link) };
+        Some(current)
+    }
+}
+
+/// Groups a cluster chain into runs of physically adjacent cluster numbers.
+///
+/// Wraps any iterator of cluster numbers (typically [`ClusterChainIter`]) and merges
+/// consecutive entries whose numbers differ by exactly one into a single item
+/// `(first_cluster, count)`. For example, chain `5 → 6 → 7 → 20` yields
+/// `(5, 3)` then `(20, 1)`.
+///
+/// Physical adjacency of cluster numbers implies contiguous sectors on disk, so each
+/// run can be read in one I/O operation (see [`Fat::read_contiguous_clusters_to`]).
+pub(crate) struct ContiguousClusterRuns<I> {
+    /// Underlying cluster chain iterator.
+    inner: I,
+
+    /// First cluster of the next run, saved when adjacency breaks mid-iteration.
+    buffered: Option<u32>,
+}
+
+impl<I: Iterator<Item = u32>> ContiguousClusterRuns<I> {
+    pub(crate) fn new(inner: I) -> Self {
+        Self {
+            inner,
+            buffered: None,
+        }
+    }
+}
+
+impl<I: Iterator<Item = u32>> Iterator for ContiguousClusterRuns<I> {
+    type Item = (u32, u32);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let first = self.buffered.take().or_else(|| self.inner.next())?;
+        let mut count = 1u32;
+        let mut last = first;
+
+        for next in self.inner.by_ref() {
+            if next == last + 1 {
+                count += 1;
+                last = next;
+            } else {
+                self.buffered = Some(next);
+                break;
+            }
+        }
+
+        Some((first, count))
+    }
+}
 
 pub struct Fat {
     data_source: Arc<Mutex<dyn FatDataSource>>,
     time_source: Arc<dyn FatTimeSource>,
     partition_first_sector_lba: u32,
     pub(crate) bpb: BiosParameterBlock,
-    pub(crate) file_allocation_table: Vec<u32>,
 }
 
 impl Fat {
@@ -39,74 +140,88 @@ impl Fat {
         let bpb = Self::read_bpb(Arc::clone(&data_source), partition_first_sector_lba)
             .expect("Failed to read Bios Parameter Block");
 
-        let mut fat = Self {
+        let fat = Self {
             data_source,
             time_source,
             partition_first_sector_lba,
             bpb,
-            file_allocation_table: Vec::new(),
         };
 
-        fat.init().unwrap();
-
-        Rc::new(RefCell::new(fat))
-    }
-
-    fn init(&mut self) -> Result<(), FileSystemError> {
-        // Safety: We can cast FAT because x86_64 endianness is the same as FAT endianness
         if cfg!(target_endian = "big") {
             unimplemented!();
         }
 
-        let fat_size = self.bpb.sectors_per_fat_32;
-        let fat_start = self.bpb.reserved_sector_count as u32;
-        let sectors = self.read_sectors(fat_start, fat_size)?;
+        Rc::new(RefCell::new(fat))
+    }
 
-        let fat = sectors
-            .into_iter()
-            .flatten()
-            .array_chunks()
-            .map(u32::from_le_bytes)
-            .collect();
+    /// Returns the partition-relative LBA of the first sector
+    /// of the FAT (immediately after the reserved region).
+    fn fat_start_sector(&self) -> u32 {
+        self.bpb.reserved_sector_count as u32
+    }
 
-        self.file_allocation_table = fat;
+    /// Reads the 32-bit FAT entry at `index`, loading its sector into `cache` only when needed.
+    fn read_fat_entry(
+        &self,
+        index: u32,
+        cache: &mut FatSectorCache,
+    ) -> Result<u32, FileSystemError> {
+        let sector_in_fat = index / FAT32_ENTRIES_PER_SECTOR;
+        let entry_in_sector = index % FAT32_ENTRIES_PER_SECTOR;
+        let lba = self.fat_start_sector() + sector_in_fat;
+
+        if cache.sector_lba != Some(lba) {
+            cache.data = self.read_sectors(lba, 1)?[0];
+            cache.sector_lba = Some(lba);
+        }
+
+        let offset = (entry_in_sector as usize) * 4;
+        Ok(u32::from_le_bytes(
+            cache.data[offset..offset + 4]
+                .try_into()
+                .map_err(|_| FileSystemError::BadData)?,
+        ))
+    }
+
+    /// Writes a single 32-bit FAT entry at `index` to the backing store.
+    pub(crate) fn write_fat_entry(&self, index: u32, value: u32) -> Result<(), FileSystemError> {
+        let sector_in_fat = index / FAT32_ENTRIES_PER_SECTOR;
+        let entry_in_sector = index % FAT32_ENTRIES_PER_SECTOR;
+        let lba = self.partition_first_sector_lba + self.fat_start_sector() + sector_in_fat;
+
+        let mut sector = self.read_sectors(self.fat_start_sector() + sector_in_fat, 1)?[0];
+        let offset = (entry_in_sector as usize) * 4;
+        sector[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+
+        self.data_source
+            .lock()
+            .unwrap()
+            .write_sector(lba, &sector)?;
 
         Ok(())
     }
 
-    /// Returns an iterator over the cluster chain for a file starting from the given initial cluster.
-    /// This iterator yields cluster numbers in the order they are linked within the File Allocation Table.
-    ///
-    /// The iterator can be cloned and supports double-ended iteration, allowing traversal from both the beginning and the end.
-    ///
-    /// # Parameters
-    ///
-    /// - `cluster`: The initial cluster number from which to start the iteration.
-    ///
-    /// # Returns
-    ///
-    /// An iterator that yields `u32` values representing the cluster numbers in the file's cluster chain.
-    pub(crate) fn get_clusters_for_file(
-        &self,
-        mut cluster: u32,
-    ) -> impl DoubleEndedIterator<Item = u32> + Clone {
-        // @TODO: Do some tests to find optimal value
-        let mut clusters = Vec::with_capacity(32);
-        clusters.push(cluster);
+    /// Returns an iterator over the cluster chain, loading FAT entries on demand.
+    pub(crate) fn get_clusters_for_file(&self, cluster: u32) -> ClusterChainIter<'_> {
+        ClusterChainIter {
+            fat: self,
+            next: Some(cluster),
+            cache: FatSectorCache::empty(),
+        }
+    }
+
+    /// Returns the last cluster in the FAT chain starting at `start`.
+    pub(crate) fn last_cluster_in_chain(&self, start: u32) -> Result<u32, FileSystemError> {
+        let mut cache = FatSectorCache::empty();
+        let mut current = start;
 
         loop {
-            let next_cluster = self.file_allocation_table[cluster as usize];
-
-            if next_cluster >= 0x0FFFFFF8 {
-                // Last entry
-                break;
+            let next = self.read_fat_entry(current, &mut cache)?;
+            if next >= 0x0FFFFFF8 {
+                return Ok(current);
             }
-
-            clusters.push(next_cluster);
-            cluster = next_cluster;
+            current = next;
         }
-
-        clusters.into_iter()
     }
 
     /// Retrieves a list of raw file entries from a specified cluster.
@@ -200,25 +315,22 @@ impl Fat {
     ///
     /// - `first_sector_lba`: The Logical Block Address of the first sector to read.
     /// - `n`: The number of sectors to read.
-    fn read_sectors(&self, first_sector_lba: u32, n: u32) -> Result<Vec<Sector>, FileSystemError> {
-        if n * 512 >= (u16::MAX - 1) as u32 {
-            let mut sectors = vec![[0u8; 512]; n as usize];
-            let mut data_source = self.data_source.lock().unwrap();
-
-            for i in 0..(n - 2) {
-                data_source.read_sectors_to(
-                    self.partition_first_sector_lba + first_sector_lba + i,
-                    &mut sectors[(i as usize)..((i + 1) as usize)],
-                )?;
-            }
-
-            return Ok(sectors);
-        }
-
+    fn read_partition_sectors_to(
+        &self,
+        first_sector_lba: u32,
+        buffer: &mut [Sector],
+    ) -> Result<(), FileSystemError> {
         self.data_source
             .lock()
             .unwrap()
-            .read_sectors(self.partition_first_sector_lba + first_sector_lba, n)
+            .read_sectors_to(self.partition_first_sector_lba + first_sector_lba, buffer)
+    }
+
+    /// Reads `n` consecutive partition-relative sectors starting at `first_sector_lba` and returns them as a vector.
+    fn read_sectors(&self, first_sector_lba: u32, n: u32) -> Result<Vec<Sector>, FileSystemError> {
+        let mut sectors = vec![[0u8; FAT_SECTOR_SIZE]; n as usize];
+        self.read_partition_sectors_to(first_sector_lba, &mut sectors)?;
+        Ok(sectors)
     }
 
     /// Reads all sectors belonging to a specified cluster and returns them as a vector of `Sector` structs.
@@ -242,24 +354,25 @@ impl Fat {
         cluster: u32,
         buffer: &mut [u8],
     ) -> Result<(), FileSystemError> {
-        assert_eq!(
-            self.bpb.bytes_per_sector * (self.bpb.sectors_per_cluster as u16),
-            buffer.len() as u16
-        );
+        self.read_contiguous_clusters_to(cluster, 1, buffer)
+    }
+
+    /// Reads `cluster_count` physically adjacent clusters starting at `first_cluster`.
+    pub(crate) fn read_contiguous_clusters_to(
+        &self,
+        first_cluster: u32,
+        cluster_count: u32,
+        buffer: &mut [u8],
+    ) -> Result<(), FileSystemError> {
+        let cluster_bytes =
+            self.bpb.bytes_per_sector as usize * self.bpb.sectors_per_cluster as usize;
+        assert_eq!(buffer.len(), cluster_bytes * cluster_count as usize);
 
         let sector_buffer: &mut [Sector] = cast_slice_mut(buffer);
-        let mut data_source = self.data_source.lock().unwrap();
-
-        for i in 0..self.bpb.sectors_per_cluster {
-            data_source.read_sectors_to(
-                self.partition_first_sector_lba
-                    + self.convert_cluster_number_to_sector_number(cluster)
-                    + i as u32,
-                &mut sector_buffer[(i as usize)..((i + 1) as usize)],
-            )?
-        }
-
-        Ok(())
+        self.read_partition_sectors_to(
+            self.convert_cluster_number_to_sector_number(first_cluster),
+            sector_buffer,
+        )
     }
 
     /// Writes data from the provided buffer to all sectors belonging to a specified cluster.
@@ -307,7 +420,7 @@ impl Fat {
         &mut self,
         count: usize,
     ) -> Result<impl Iterator<Item = (usize, u32)>, FileSystemError> {
-        let free_clusters: Vec<(usize, u32)> = self.find_free_clusters(count).collect();
+        let free_clusters = self.find_free_clusters(count)?;
 
         if free_clusters.len() < count {
             return Err(FileSystemError::NotEnoughSpace);
@@ -319,10 +432,9 @@ impl Fat {
             let next_cluster = free_cluster_iterator.peek();
 
             if let Some((next_index, _)) = next_cluster {
-                self.file_allocation_table[free_cluster.0] = *next_index as u32;
+                self.write_fat_entry(free_cluster.0 as u32, *next_index as u32)?;
             } else {
-                // End of file
-                self.file_allocation_table[free_cluster.0] = 0xFFFF_FFFF;
+                self.write_fat_entry(free_cluster.0 as u32, FAT_END_OF_FILE_MARK)?;
             }
         }
 
@@ -336,28 +448,12 @@ impl Fat {
     /// # Parameters
     ///
     /// - `starting_cluster`: The cluster number from which to start marking clusters as free.
-    pub(crate) fn mark_clusters_as_free(&mut self, starting_cluster: u32) {
-        self.get_clusters_for_file(starting_cluster)
-            .for_each(|cluster| {
-                self.file_allocation_table[cluster as usize] = 0x00;
-            });
-    }
-
-    /// Saves modified file allocation table to the underlying storage
-    pub fn save_fat(&self) -> Result<(), FileSystemError> {
-        let mut data_source = self.data_source.lock().unwrap();
-
-        let fat_size = self.bpb.sectors_per_fat_32 as usize;
-        let fat_start = self.bpb.reserved_sector_count as usize;
-        let fat = self.file_allocation_table.as_slice();
-        let fat_slice: &[u8] = cast_slice(fat);
-
-        assert_eq!(fat_slice.len(), fat_size * FAT_SECTOR_SIZE);
-
-        for i in 0..fat_size {
-            let slice = &fat_slice[(i * FAT_SECTOR_SIZE)..((i + 1) * FAT_SECTOR_SIZE)];
-
-            data_source.write_sector((fat_start + i) as u32, slice)?;
+    pub(crate) fn mark_clusters_as_free(
+        &mut self,
+        starting_cluster: u32,
+    ) -> Result<(), FileSystemError> {
+        for cluster in self.get_clusters_for_file(starting_cluster) {
+            self.write_fat_entry(cluster, FAT_FREE_SECTOR)?;
         }
 
         Ok(())
@@ -373,13 +469,31 @@ impl Fat {
     /// # Returns
     ///
     /// An iterator over free clusters, where each item is a tuple containing the number of the cluster and it's value.
-    fn find_free_clusters(&mut self, count: usize) -> impl Iterator<Item = (usize, u32)> + '_ {
-        self.file_allocation_table
-            .iter()
-            .cloned()
-            .enumerate()
-            .filter(|entry| entry.1 == FAT_FREE_SECTOR)
-            .take(count + 1)
+    fn find_free_clusters(&mut self, count: usize) -> Result<Vec<(usize, u32)>, FileSystemError> {
+        let mut free = Vec::with_capacity(count);
+        let fat_start = self.fat_start_sector();
+        let fat_sectors = self.bpb.sectors_per_fat_32;
+
+        'outer: for sector_idx in 0..fat_sectors {
+            let sector = self.read_sectors(fat_start + sector_idx, 1)?[0];
+
+            for (entry_idx, chunk) in sector.as_slice().chunks_exact(4).enumerate() {
+                let index = sector_idx as usize * FAT32_ENTRIES_PER_SECTOR as usize + entry_idx;
+                if index < 2 {
+                    continue;
+                }
+
+                let value = u32::from_le_bytes(chunk.try_into().unwrap());
+                if value == FAT_FREE_SECTOR {
+                    free.push((index, value));
+                    if free.len() >= count {
+                        break 'outer;
+                    }
+                }
+            }
+        }
+
+        Ok(free)
     }
 
     /// Convers cluster number to starting sector number.
@@ -557,7 +671,11 @@ impl Fat {
         let mut raw_file_entries_iterator = file_entry.raw.iter().skip(1);
         let mut writing_index = starting_index;
 
-        for cluster in self.get_clusters_for_file(starting_directory_cluster) {
+        let clusters: Vec<u32> = self
+            .get_clusters_for_file(starting_directory_cluster)
+            .collect();
+
+        for cluster in clusters {
             let mut file_listing = self.get_raw_file_listing_from_cluster(cluster)?;
 
             for file_listing in file_listing.iter_mut().skip(writing_index) {
@@ -598,7 +716,12 @@ impl Fat {
         let mut lfn_handling = false;
         let is_lfn = file_entry.raw.len() > 1;
 
-        for cluster in self.get_clusters_for_file(directory_cluster).rev() {
+        for cluster in self
+            .get_clusters_for_file(directory_cluster)
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+        {
             let mut file_listing = self.get_raw_file_listing_from_cluster(cluster)?;
             let size = file_listing.len();
 
@@ -761,9 +884,9 @@ impl Fat {
         let mut starting_cluster = 0;
         let mut starting_index = 0;
 
-        let clusters = self.get_clusters_for_file(directory_cluster);
+        let last_cluster = self.last_cluster_in_chain(directory_cluster)?;
 
-        for cluster in clusters.clone() {
+        for cluster in self.get_clusters_for_file(directory_cluster) {
             for (index, entry) in self
                 .get_raw_file_listing_from_cluster(cluster)?
                 .iter()
@@ -799,10 +922,9 @@ impl Fat {
         }
 
         // There's no sufficient entries in directory so need to allocate some
-        let current_last_cluster = clusters.last().unwrap();
         let first_new_cluster = self.allocate_and_link_clusters(1)?.next().unwrap().0;
 
-        self.file_allocation_table[current_last_cluster as usize] = first_new_cluster as u32;
+        self.write_fat_entry(last_cluster, first_new_cluster as u32)?;
 
         if chain_found {
             Ok((starting_cluster, starting_index))
