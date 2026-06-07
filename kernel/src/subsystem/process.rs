@@ -184,5 +184,4 @@ pub struct Registers {
     pub(crate) ss: u64,
     pub(crate) fs: u64,
     pub(crate) gs: u64,
-    pub(crate) padding_: u64,
 }
