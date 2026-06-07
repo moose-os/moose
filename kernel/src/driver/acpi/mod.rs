@@ -23,7 +23,8 @@ use acpica_rs::{
 };
 
 use crate::subsystem::memory::{
-    Frame, MemoryError, Page, PageFlags, PhysicalAddress, VirtualAddress, memory_manager,
+    CurrentAddressSpace, Exact, Frame, Identity, MemoryError, Page, PageFlags, PhysicalAddress,
+    VirtualAddress, memory_manager,
 };
 
 /// Root System Description Pointer Signature
@@ -93,15 +94,18 @@ impl Acpi {
         {
             let mut memory_manager = memory_manager().write();
 
+            let page = Page::new(VirtualAddress::new(rsdt_address & 0xFFFF_FFFF_F000));
+            let frame = Frame::new(PhysicalAddress::new(rsdt_address & 0xFFFF_FFFF_F000));
+
             match unsafe {
-                memory_manager.map_for_current_address_space(
-                    &Page::new(VirtualAddress::new(rsdt_address & 0xFFFF_FFFF_F000)),
-                    &Frame::new(PhysicalAddress::new(rsdt_address & 0xFFFF_FFFF_F000)),
+                memory_manager.map(
+                    CurrentAddressSpace,
+                    Exact(&page, &frame),
                     PageFlags::empty(),
                 )
             } {
                 // If page was unmapped, and we've just mapped it, it's ok
-                Ok(()) => {}
+                Ok(_) => {}
                 // If page was already mapped, it means that we have mapped it in previous loop
                 // iteration, and it's ok
                 Err(MemoryError::AlreadyMapped) => {}
@@ -130,13 +134,13 @@ impl Acpi {
             // Map table into memory
             unsafe {
                 let page_number = pointer_to_entry_header as u64 & PAGE_NUMBER_MASK;
-                match memory_manager().write().map_for_current_address_space(
-                    &Page::new(VirtualAddress::new(page_number)),
-                    &Frame::new(PhysicalAddress::new(page_number)),
-                    PageFlags::empty(),
-                ) {
+                let page = Page::new(VirtualAddress::new(page_number));
+
+                let mut memory_manager = memory_manager().write();
+
+                match memory_manager.map(CurrentAddressSpace, Identity(&page), PageFlags::empty()) {
                     // If page was unmapped, and we've just mapped it, it's ok
-                    Ok(()) => {}
+                    Ok(_) => {}
                     // If page was already mapped, it means that we have mapped it in previous loop
                     // iteration, and it's ok
                     Err(MemoryError::AlreadyMapped) => {}
@@ -169,18 +173,20 @@ impl Acpi {
 
             unsafe {
                 memory_manager
-                    .map_identity_for_current_address_space(
-                        &Page::new(VirtualAddress::new(0xFED00000)),
+                    .map(
+                        CurrentAddressSpace,
+                        Identity(&Page::new(VirtualAddress::new(0xFED00000))),
                         PageFlags::WRITABLE | PageFlags::WRITE_THROUGH | PageFlags::DISABLE_CACHING,
                     )
                     .unwrap();
 
                 memory_manager
-                    .map_identity_for_current_address_space(
-                        &Page::new(VirtualAddress::new(0xFED80000)),
+                    .map(
+                        CurrentAddressSpace,
+                        Identity(&Page::new(VirtualAddress::new(0xFED80000))),
                         PageFlags::WRITABLE | PageFlags::WRITE_THROUGH | PageFlags::DISABLE_CACHING,
                     )
-                    .unwrap()
+                    .unwrap();
             }
         }
 

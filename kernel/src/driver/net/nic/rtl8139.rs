@@ -20,7 +20,8 @@ use crate::{
     },
     kernel::kernel_ref,
     subsystem::memory::{
-        Frame, PAGE_SIZE, Page, PageFlags, PhysicalAddress, VirtualAddress, memory_manager,
+        CurrentAddressSpace, Exact, Frame, Identity, PAGE_SIZE, Page, PageFlags, PhysicalAddress,
+        VirtualAddress, memory_manager,
     },
 };
 
@@ -59,24 +60,26 @@ impl Rtl8139 {
 
         // Identity map frame buffer pages
         for frame in &frames {
+            let page = Page::new(VirtualAddress::new(frame.address().as_u64()));
+
             unsafe {
                 memory_manager
-                    .map_identity_for_current_address_space(
-                        &Page::new(VirtualAddress::new(frame.address().as_u64())),
-                        PageFlags::WRITABLE,
-                    )
+                    .map(CurrentAddressSpace, Identity(&page), PageFlags::WRITABLE)
                     .unwrap();
             }
         }
 
         // Map start of the buffer right after the end
+        let page = Page::new(VirtualAddress::new(
+            frames.last().unwrap().address().as_u64() + PAGE_SIZE as u64,
+        ));
+        let frame = Frame::new(PhysicalAddress::new(frames[0].address().as_u64()));
+
         unsafe {
             memory_manager
-                .map_for_current_address_space(
-                    &Page::new(VirtualAddress::new(
-                        frames.last().unwrap().address().as_u64() + PAGE_SIZE as u64,
-                    )),
-                    &Frame::new(PhysicalAddress::new(frames[0].address().as_u64())),
+                .map(
+                    CurrentAddressSpace,
+                    Exact(&page, &frame),
                     PageFlags::WRITABLE,
                 )
                 .unwrap();

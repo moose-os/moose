@@ -4,7 +4,9 @@ use bitfield_struct::bitfield;
 
 use crate::{
     driver::acpi::MadtIoApic,
-    subsystem::memory::{MemoryError, Page, PageFlags, VirtualAddress, memory_manager},
+    subsystem::memory::{
+        CurrentAddressSpace, Identity, MemoryError, Page, PageFlags, VirtualAddress, memory_manager,
+    },
 };
 
 const IO_APIC_ID_REGISTER: u32 = 0x00;
@@ -24,13 +26,13 @@ impl IoApic {
         let register_data_ptr = (madt_io_apic.io_apic_address + 0x10) as *mut u32;
 
         unsafe {
-            if let Err(e) = memory_manager()
-                .write()
-                .map_identity_for_current_address_space(
-                    &Page::new(VirtualAddress::new(madt_io_apic.io_apic_address as u64)),
-                    PageFlags::WRITABLE | PageFlags::WRITE_THROUGH,
-                )
-            {
+            let io_apic_page = Page::new(VirtualAddress::new(madt_io_apic.io_apic_address as u64));
+
+            if let Err(e) = memory_manager().write().map(
+                CurrentAddressSpace,
+                Identity(&io_apic_page),
+                PageFlags::WRITABLE | PageFlags::WRITE_THROUGH,
+            ) {
                 match e {
                     MemoryError::AlreadyMapped => {}
                     invalid => panic!("{}", invalid),

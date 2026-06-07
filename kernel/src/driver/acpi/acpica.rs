@@ -14,7 +14,10 @@ use libm::ceil;
 use crate::{
     arch::x86::asm::{inb, inl, inw, outb, outl, outw},
     driver::pci::Pci,
-    subsystem::memory::{MemoryError, PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager},
+    subsystem::memory::{
+        CurrentAddressSpace, Identity, MemoryError, PAGE_SIZE, Page, PageFlags, VirtualAddress,
+        memory_manager,
+    },
 };
 
 struct SizePrefixedAllocation {
@@ -43,16 +46,15 @@ impl AcpicaOsServices for MooseAcpicaOsImplementation {
 
         let mut memory_manager = memory_manager().write();
         for i in 0..pages_to_map {
+            let page = Page::new(VirtualAddress::new(
+                ((address & 0xFFFF_FFFF_FFFF_F000) + i * PAGE_SIZE) as u64,
+            ));
+
             match unsafe {
-                memory_manager.map_identity_for_current_address_space(
-                    &Page::new(VirtualAddress::new(
-                        ((address & 0xFFFF_FFFF_FFFF_F000) + i * PAGE_SIZE) as u64,
-                    )),
-                    PageFlags::WRITABLE,
-                )
+                memory_manager.map(CurrentAddressSpace, Identity(&page), PageFlags::WRITABLE)
             } {
                 // If page was unmapped, and we've just mapped it, it's ok
-                Ok(()) => {}
+                Ok(_) => {}
                 // If page was already mapped, it means that we have mapped it in previous loop
                 // iteration, and it's ok
                 Err(MemoryError::AlreadyMapped) => {}

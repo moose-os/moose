@@ -9,10 +9,11 @@ use linked_list_allocator::Heap;
 use spin::{Mutex, Once};
 
 use crate::subsystem::memory::{
-    MemoryError, PAGE_SIZE, Page, PageFlags, VirtualAddress, memory_manager,
+    CurrentAddressSpace, Exact, MemoryError, PAGE_SIZE, Page, PageFlags, VirtualAddress,
+    memory_manager,
 };
 
-pub(crate) const HEAP_START: usize = 0x4444_4444_0000;
+pub(crate) const HEAP_START: usize = 0xffffffff82220000;
 const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 #[global_allocator]
@@ -26,7 +27,11 @@ pub fn initialize_heap() -> Result<(), MemoryError> {
         let frame = memory_manager.allocate_frame().expect("Failed to allocate");
 
         unsafe {
-            memory_manager.map_for_current_address_space(&page, &frame, PageFlags::WRITABLE)?
+            memory_manager.map(
+                CurrentAddressSpace,
+                Exact(&page, &frame),
+                PageFlags::WRITABLE,
+            )?
         };
     }
 
@@ -98,7 +103,11 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
                 let frame = memory_manager.allocate_frame().expect("Failed to allocate");
 
                 unsafe {
-                    memory_manager.map_for_current_address_space(&page, &frame, PageFlags::WRITABLE)
+                    memory_manager.map(
+                        CurrentAddressSpace,
+                        Exact(&page, &frame),
+                        PageFlags::WRITABLE,
+                    )
                 }
                 .unwrap();
             }
@@ -112,7 +121,11 @@ unsafe impl GlobalAlloc for KernelHeapAllocator {
                 if let Some(frame) = memory_manager.allocate_frame() {
                     unsafe {
                         if memory_manager
-                            .map_for_current_address_space(&page, &frame, PageFlags::WRITABLE)
+                            .map(
+                                CurrentAddressSpace,
+                                Exact(&page, &frame),
+                                PageFlags::WRITABLE,
+                            )
                             .is_err()
                         {
                             break;

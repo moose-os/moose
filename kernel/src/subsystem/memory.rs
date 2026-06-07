@@ -2,6 +2,7 @@ use core::{
     fmt::Debug,
     ops::{Index, IndexMut},
     ptr,
+    range::Range,
 };
 
 use bitflags::bitflags;
@@ -51,122 +52,55 @@ impl MemoryManager {
         first_frame
     }
 
-    pub unsafe fn map_for_current_address_space(
+    pub unsafe fn map<'a>(
         &mut self,
-        page: &Page,
-        frame: &Frame,
+        target: impl Into<MapTarget>,
+        map: impl Into<Map<'a>>,
         page_flags: PageFlags,
+    ) -> Result<MapResult, MemoryError> {
+        let target = target.into();
+        let map = map.into();
+
+        unsafe { self.map_impl(&target, &map, page_flags) }
+    }
+
+    pub unsafe fn map_temporary<'a>(
+        &mut self,
+        target: impl Into<MapTarget>,
+        map: impl Into<Map<'a>>,
+        page_flags: PageFlags,
+        f: impl FnOnce(MapResult),
     ) -> Result<(), MemoryError> {
-        unsafe {
-            self.map(
-                current_page_table(self.physical_memory_offset),
-                page,
-                frame,
-                page_flags,
-            )
-        }
-    }
+        let target = target.into();
+        let map = map.into();
 
-    pub unsafe fn map(
-        &mut self,
-        page_table: *mut PageTable,
-        page: &Page,
-        frame: &Frame,
-        page_flags: PageFlags,
-    ) -> Result<(), MemoryError> {
-        self.map_inner(page_table, page, frame, page_flags)
-    }
+        let map_result = unsafe { self.map_impl(&target, &map, page_flags) }?;
 
-    pub unsafe fn map_temporary_for_current_address_space(
-        &mut self,
-        page: &Page,
-        frame: &Frame,
-        page_flags: PageFlags,
-        f: impl FnOnce(),
-    ) -> Result<(), MemoryError> {
-        unsafe { self.map_for_current_address_space(page, frame, page_flags) }?;
+        f(map_result);
 
-        f();
-
-        unsafe { self.unmap_for_current_address_space(page) }
-    }
-
-    pub unsafe fn map_identity_for_current_address_space(
-        &mut self,
-        page: &Page,
-        page_flags: PageFlags,
-    ) -> Result<(), MemoryError> {
-        unsafe {
-            self.map_for_current_address_space(
-                page,
-                &Frame::new(PhysicalAddress::new(page.address().as_u64())),
-                page_flags,
-            )
-        }
-    }
-
-    pub unsafe fn map_identity_temporary_for_current_address_space(
-        &mut self,
-        page: &Page,
-        page_flags: PageFlags,
-        f: impl FnOnce(),
-    ) -> Result<(), MemoryError> {
-        unsafe { self.map_identity_for_current_address_space(page, page_flags) }?;
-
-        f();
-
-        unsafe { self.unmap_for_current_address_space(page) }
-    }
-
-    pub unsafe fn map_any_for_current_address_space(
-        &mut self,
-        frame: &Frame,
-        page_flags: PageFlags,
-    ) -> Page {
-        self.map_any_inner(
-            unsafe { current_page_table(self.physical_memory_offset) },
-            frame,
-            page_flags,
-        )
-    }
-
-    pub unsafe fn map_any_temporary_for_current_address_space(
-        &mut self,
-        frame: &Frame,
-        page_flags: PageFlags,
-        f: impl FnOnce(Page),
-    ) -> Result<(), MemoryError> {
-        let page = unsafe { self.map_any_for_current_address_space(frame, page_flags) };
-
-        f(page);
-
-        unsafe { self.unmap_for_current_address_space(&page) }
-    }
-
-    pub unsafe fn map_any_contiguous_for_current_address_space(
-        &mut self,
-        frame_range: FrameRange,
-        page_flags: PageFlags,
-    ) -> PageRange {
-        unsafe {
-            self.map_any_contiguous(
-                current_page_table(self.physical_memory_offset),
-                frame_range,
-                page_flags,
-            )
-        }
+        unsafe { self.unmap(target, &map_result.page) }
     }
 
     pub unsafe fn map_any_contiguous(
         &mut self,
-        level_4_page_table: *mut PageTable,
+        target: impl Into<MapTarget>,
+        level_4_page_table_entry_idx_range: Range<usize>,
         frame_range: FrameRange,
         page_flags: PageFlags,
     ) -> PageRange {
+        let target = target.into();
+
+        let level_4_page_table = match target {
+            MapTarget::CurrentAddressSpace() => unsafe {
+                current_page_table(self.physical_memory_offset)
+            },
+            MapTarget::CustomAddressSpace(page_table) => page_table,
+        };
+
         let mut current_sequence_start = None;
         let mut current_sequence_length = 0;
 
-        'outer: for level_4_page_table_entry_index in 0..512 {
+        'outer: for level_4_page_table_entry_index in level_4_page_table_entry_idx_range {
             let level_4_page_table_entry =
                 &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
 
@@ -379,10 +313,14 @@ impl MemoryManager {
                 | ((level_1_page_table_entry_index as u64) << 12);
 
             if steps == frame_range.n() {
+                let address = sign_extend(address);
+
                 start_address = VirtualAddress::new(address);
             }
 
             if steps == 1 {
+                let address = sign_extend(address);
+
                 end_address = VirtualAddress::new(address);
             }
 
@@ -413,14 +351,20 @@ impl MemoryManager {
         PageRange::new(start_address, end_address)
     }
 
-    pub unsafe fn unmap_for_current_address_space(&self, page: &Page) -> Result<(), MemoryError> {
-        self.unmap_inner(
-            unsafe { current_page_table(self.physical_memory_offset) },
-            page,
-        )
-    }
+    pub unsafe fn unmap(
+        &self,
+        target: impl Into<MapTarget>,
+        page: &Page,
+    ) -> Result<(), MemoryError> {
+        let target = target.into();
 
-    pub unsafe fn unmap(&self, page_table: *mut PageTable, page: &Page) -> Result<(), MemoryError> {
+        let page_table = match target {
+            MapTarget::CurrentAddressSpace() => unsafe {
+                current_page_table(self.physical_memory_offset)
+            },
+            MapTarget::CustomAddressSpace(page_table) => page_table,
+        };
+
         self.unmap_inner(page_table, page)
     }
 
@@ -554,6 +498,49 @@ impl MemoryManager {
         ))
     }
 
+    unsafe fn map_impl<'a>(
+        &mut self,
+        target: &MapTarget,
+        map: &Map<'a>,
+        page_flags: PageFlags,
+    ) -> Result<MapResult, MemoryError> {
+        let page_table = match target {
+            MapTarget::CurrentAddressSpace() => unsafe {
+                current_page_table(self.physical_memory_offset)
+            },
+            MapTarget::CustomAddressSpace(page_table) => *page_table,
+        };
+
+        match *map {
+            Map::Exact(page, frame) => {
+                self.map_inner(page_table, page, frame, page_flags)
+                    .map(|_| MapResult {
+                        page: *page,
+                        frame: *frame,
+                    })
+            }
+            Map::Identity(page) => {
+                let frame = Frame::new(PhysicalAddress::new(page.address().as_u64()));
+
+                self.map_inner(page_table, page, &frame, page_flags)
+                    .map(|_| MapResult { page: *page, frame })
+            }
+            Map::Any(frame, level_4_page_table_entry_idx_range) => {
+                let page = self.map_any_inner(
+                    page_table,
+                    level_4_page_table_entry_idx_range,
+                    frame,
+                    page_flags,
+                );
+
+                Ok(MapResult {
+                    page,
+                    frame: *frame,
+                })
+            }
+        }
+    }
+
     fn map_inner(
         &mut self,
         level_4_page_table: *mut PageTable,
@@ -563,7 +550,7 @@ impl MemoryManager {
     ) -> Result<(), MemoryError> {
         let address = page.address();
 
-        assert!(address.as_u64() < (1 << 48));
+        assert!(address.as_u64() == sign_extend(address.as_u64()));
 
         // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30 | ... | 22 | 21 | ... | 12 | 11 | ... | 0 |
         // | Unused        | Page level 4  | Page level 3  | Page level 2  | Page level 1  | 4 KiB offset |
@@ -699,10 +686,11 @@ impl MemoryManager {
     fn map_any_inner(
         &mut self,
         level_4_page_table: *mut PageTable,
+        level_4_page_table_entry_idx_range: Range<usize>,
         frame: &Frame,
         page_flags: PageFlags,
     ) -> Page {
-        for level_4_page_table_entry_index in 0..512 {
+        for level_4_page_table_entry_index in level_4_page_table_entry_idx_range {
             let level_4_page_table_entry =
                 &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
 
@@ -837,10 +825,12 @@ impl MemoryManager {
                             );
                         }
 
-                        let address = ((level_4_page_table_entry_index as u64) << 39)
-                            | ((level_3_page_table_entry_index as u64) << 30)
-                            | ((level_2_page_table_entry_index as u64) << 21)
-                            | ((level_1_page_table_entry_index as u64) << 12);
+                        let address = sign_extend(
+                            ((level_4_page_table_entry_index as u64) << 39)
+                                | ((level_3_page_table_entry_index as u64) << 30)
+                                | ((level_2_page_table_entry_index as u64) << 21)
+                                | ((level_1_page_table_entry_index as u64) << 12),
+                        );
 
                         return Page::new(VirtualAddress::new(address));
                     }
@@ -1050,6 +1040,77 @@ impl MemoryManager {
         if page_flags.contains(PageFlags::USER_MODE_ACCESSIBLE) {
             page_table_entry.set_flags(page_table_entry.flags() | PageTableFlags::USER_ACCESSIBLE);
         }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct MapResult {
+    pub page: Page,
+    pub frame: Frame,
+}
+
+#[derive(Clone, Copy)]
+pub enum MapTarget {
+    CurrentAddressSpace(),
+    CustomAddressSpace(*mut PageTable),
+    //TopLevelPageTableEntry(*mut PageTable),
+}
+
+pub struct CurrentAddressSpace;
+
+impl From<CurrentAddressSpace> for MapTarget {
+    fn from(_: CurrentAddressSpace) -> Self {
+        Self::CurrentAddressSpace()
+    }
+}
+
+#[repr(transparent)]
+pub struct AddressSpace(pub *mut PageTable);
+
+impl From<AddressSpace> for MapTarget {
+    fn from(value: AddressSpace) -> Self {
+        Self::CustomAddressSpace(value.0)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum Map<'a> {
+    Exact(&'a Page, &'a Frame),
+    Identity(&'a Page),
+    Any(&'a Frame, Range<usize>),
+}
+
+pub struct Exact<'a>(pub &'a Page, pub &'a Frame);
+
+impl<'a> From<Exact<'a>> for Map<'a> {
+    fn from(value: Exact<'a>) -> Self {
+        Map::Exact(value.0, value.1)
+    }
+}
+
+#[repr(transparent)]
+pub struct Identity<'a>(pub &'a Page);
+
+impl<'a> From<Identity<'a>> for Map<'a> {
+    fn from(value: Identity<'a>) -> Self {
+        Self::Identity(value.0)
+    }
+}
+
+#[repr(transparent)]
+pub struct Any<'a>(pub &'a Frame);
+
+impl<'a> From<Any<'a>> for Map<'a> {
+    fn from(value: Any<'a>) -> Self {
+        Self::Any(value.0, Range { start: 0, end: 512 })
+    }
+}
+
+pub struct AnyIn<'a>(pub &'a Frame, pub core::ops::Range<usize>);
+
+impl<'a> From<AnyIn<'a>> for Map<'a> {
+    fn from(value: AnyIn<'a>) -> Self {
+        Self::Any(value.0, value.1.into())
     }
 }
 
@@ -1429,4 +1490,11 @@ pub unsafe fn current_page_table(physical_memory_offset: u64) -> *mut PageTable 
     let virtual_address = physical_memory_offset + physical_address.as_u64();
 
     virtual_address as *mut PageTable
+}
+
+// Converts a potentially non-canonical address into a canonical one
+#[inline(always)]
+fn sign_extend(address: u64) -> u64 {
+    // Shifts bit 47 to the highest position and then shifts right, which copies the bit over
+    (((address as i64) << 16) >> 16) as u64
 }

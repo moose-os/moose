@@ -8,7 +8,8 @@ use goblin::elf::{
 use snafu::Snafu;
 
 use crate::subsystem::memory::{
-    MemoryManager, PAGE_SIZE, Page, PageFlags, PageTable, VirtualAddress,
+    AddressSpace, Any, CurrentAddressSpace, Exact, MemoryManager, PAGE_SIZE, Page, PageFlags,
+    PageTable, VirtualAddress,
 };
 
 pub struct Linker;
@@ -101,11 +102,12 @@ impl Linker {
                 unsafe {
                     // FIXME: This shouldn't panic
                     memory_manager
-                        .map_any_temporary_for_current_address_space(
-                            &frame,
+                        .map_temporary(
+                            CurrentAddressSpace,
+                            Any(&frame),
                             PageFlags::WRITABLE,
-                            |page| {
-                                let destination = page.address().as_mut_ptr::<u8>();
+                            |map_result| {
+                                let destination = map_result.page.address().as_mut_ptr::<u8>();
 
                                 slice::from_raw_parts_mut(
                                     destination.add(offset as usize),
@@ -128,7 +130,7 @@ impl Linker {
 
                     // FIXME: This shouldn't panic
                     memory_manager
-                        .map(page_table, &page, &frame, flags)
+                        .map(AddressSpace(page_table), Exact(&page, &frame), flags)
                         .unwrap();
                 }
             }
