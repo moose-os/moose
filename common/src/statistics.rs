@@ -3,7 +3,10 @@
 //! Provides [`average`] and [`std_dev`] over integer samples via the [`Number`] trait,
 //! without floating-point arithmetic.
 //!
-use core::ops::{Add, Div, Mul, Sub};
+use core::{
+    fmt::Debug,
+    ops::{Add, Div, Mul, Rem, Sub},
+};
 
 /// Trait for integer-like numeric types compatible with `no_std`.
 /// Required because `core` provides no `.sqrt()` for integers.
@@ -16,15 +19,12 @@ pub trait Number:
     + Sub<Output = Self>
     + Mul<Output = Self>
     + Div<Output = Self>
+    + Rem<Output = Self>
+    + TryFrom<usize>
 {
-    fn from_usize(val: usize) -> Self;
-    fn sqrt(self) -> Self;
-}
-
-impl Number for u64 {
-    fn from_usize(val: usize) -> Self {
-        val as u64
-    }
+    const ZERO: Self;
+    const ONE: Self;
+    const TWO: Self;
 
     /// Computes the integer square root using the Babylonian (Newton's) method.
     ///
@@ -32,35 +32,48 @@ impl Number for u64 {
     /// Converges quadratically — typically 5–6 iterations for `u64::MAX`.
     /// Uses no floats and no `std`, making it safe for `no_std` targets.
     fn sqrt(self) -> Self {
-        if self == 0 {
-            return 0;
+        if self == Self::ZERO {
+            return Self::ZERO;
         }
         let mut x = self;
-        let mut y = (x + 1) / 2;
+        let mut y = (x + Self::ONE) / Self::TWO;
         while y < x {
             x = y;
-            y = (self / x + x) / 2;
+            y = (self / x + x) / Self::TWO;
         }
         x
     }
 }
 
+impl Number for u64 {
+    const ZERO: Self = 0;
+    const ONE: Self = 1;
+    const TWO: Self = 2;
+}
+
 /// Returns the arithmetic mean of `values`.
-pub fn average<N: Number>(values: &[N]) -> N {
+pub fn average<N: Number>(values: &[N]) -> N
+where
+    <N as TryFrom<usize>>::Error: Debug,
+{
     if values.is_empty() {
         return N::default();
     }
 
     let sum = values.iter().copied().fold(N::default(), Add::add);
+    let n = N::try_from(values.len()).unwrap();
 
-    sum / N::from_usize(values.len())
+    sum / n
 }
 
 /// Returns the sample standard deviation of `values`.
 ///
 /// Uses Bessel's correction (divides by `n − 1`), so at least 2 elements
 /// are required — returns `None` otherwise.
-pub fn std_dev<N: Number>(values: &[N]) -> Option<N> {
+pub fn std_dev<N: Number>(values: &[N]) -> Option<N>
+where
+    <N as TryFrom<usize>>::Error: Debug,
+{
     if values.len() < 2 {
         return None;
     }
@@ -73,7 +86,7 @@ pub fn std_dev<N: Number>(values: &[N]) -> Option<N> {
     });
 
     // Bessel's correction
-    let variance = variance_sum / N::from_usize(values.len() - 1);
+    let variance = variance_sum / N::try_from(values.len() - 1).unwrap();
 
     Some(variance.sqrt())
 }

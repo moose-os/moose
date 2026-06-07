@@ -382,7 +382,7 @@ impl Kernel {
                 cs: (5 << 3),
                 ss: (6 << 3),
                 gs: GS::read_base().as_u64(),
-                rflags: rflags::read_raw() | (1 << 9), // IF=1, enable interrupts in new thread regardless current CPU state
+                rflags: rflags::read_raw() | (1 << 9), // IF=1, enable interrupts in new thread regardless of the current CPU state
                 ..Default::default()
             }),
             stack,

@@ -46,14 +46,14 @@ impl Log for BootLogger {
                 Level::Trace => ("38;5;14m", "38;2;86;182;194m"),
             };
 
+            let time = kernel_ref()
+                .clock
+                .get()
+                .map(|c| LoggerTime::from_mono_ns(c.monotonic_ns()));
+
             interrupts::without_interrupts(|| {
                 {
                     let mut serial = kernel.serial().lock();
-
-                    let time = kernel_ref()
-                        .clock
-                        .get()
-                        .map(|c| LoggerTime::from_mono_ns(c.monotonic_ns()));
 
                     if let Some(t) = time {
                         _ = write!(&mut serial, "\x1b[36m{}\x1b[0m ", t);
@@ -81,6 +81,10 @@ impl Log for BootLogger {
 
                 if let Some(terminal) = kernel.terminal.get() {
                     let mut terminal = terminal.lock();
+
+                    if let Some(t) = time {
+                        _ = write!(&mut terminal, "\x1b[36m{}\x1b[0m ", t);
+                    }
 
                     if !shortened_target.is_empty() {
                         _ = writeln!(

@@ -12,7 +12,7 @@
 //!
 use core::{
     fmt,
-    ops::{Add, AddAssign, Sub},
+    ops::{Add, Sub},
 };
 
 use crate::{kernel::kernel_ref, subsystem::clock::system_clock::is_leap_year};
@@ -96,12 +96,6 @@ impl Add<Duration> for Instant {
     }
 }
 
-impl AddAssign<Duration> for Instant {
-    fn add_assign(&mut self, rhs: Duration) {
-        *self = *self + rhs;
-    }
-}
-
 impl Sub<Duration> for Instant {
     type Output = Self;
 
@@ -124,6 +118,7 @@ impl Sub<Instant> for Instant {
 ///
 /// `LoggerTime` formats the internal nanosecond counter into a human-readable
 /// string representation showing seconds and microseconds, padded with leading zeros.
+#[derive(Copy, Clone)]
 pub struct LoggerTime(u64);
 
 impl LoggerTime {

@@ -13,9 +13,10 @@
 //!
 //! Periodic timers are automatically re-queued after firing. Each CPU owns its own
 //! [`HrTimerSubsystem`] in [`ProcessorControlBlock::hr_timers`].
-//!
-use common::rb_tree::RedBlackTree;
+
 use core::cmp::Ordering;
+
+use common::RedBlackTree;
 use generational_arena::Index as ArenaIndex;
 
 use crate::{
@@ -69,7 +70,7 @@ pub enum TimerAction {
 }
 
 /// High-resolution timer queue backed by a generational red-black tree.
-pub struct HrTimerSubsystem {
+pub struct HrTimer {
     /// Expiry-ordered timer map. Keys are unique per registration.
     queue: RedBlackTree<TimerQueueKey, Timer>,
 
@@ -98,7 +99,7 @@ impl Ord for TimerQueueKey {
     }
 }
 
-impl HrTimerSubsystem {
+impl HrTimer {
     /// Creates an empty timer subsystem.
     pub fn new() -> Self {
         Self {
@@ -277,7 +278,7 @@ impl HrTimerSubsystem {
     }
 }
 
-impl Default for HrTimerSubsystem {
+impl Default for HrTimer {
     fn default() -> Self {
         Self::new()
     }

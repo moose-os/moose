@@ -8,8 +8,8 @@
 //!
 //! Used only for one-shot calibration at boot; the PV clock page is unregistered
 //! afterward and not polled at runtime.
-//!
-use core::{hint::spin_loop, ptr};
+
+use core::{hint, ptr};
 
 use raw_cpuid::{CpuId, Hypervisor};
 use x86_64::registers::model_specific::Msr;
@@ -43,7 +43,7 @@ pub struct KvmClockTimer {}
 
 impl ClockSource for KvmClockTimer {
     /// Detects KVM presence by checking hypervisor CPUID leaves.
-    fn present(&self) -> bool {
+    fn is_present(&self) -> bool {
         CpuId::new().get_hypervisor_info().unwrap().identify() == Hypervisor::KVM
     }
 
@@ -77,8 +77,8 @@ impl ClockSource for KvmClockTimer {
                         version = ptr::read_volatile(ptr::addr_of!((*pv_clock_ptr).version));
                         if version == 0 || version % 2 != 0 {
                             // KVM is currently writing to this page.
+                            hint::spin_loop();
 
-                            spin_loop();
                             continue;
                         }
 
@@ -93,7 +93,7 @@ impl ClockSource for KvmClockTimer {
                             break;
                         }
 
-                        spin_loop();
+                        hint::spin_loop();
                     }
 
                     // Unregister the page to clean up the hypervisor state.

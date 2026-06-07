@@ -12,7 +12,7 @@
 //!
 //! SystemClock probes these sources at boot, picks the best available one,
 //! and uses it only for calibration — none of them drive runtime timekeeping.
-//!
+
 pub mod hpet;
 pub mod hyperv;
 pub mod kvmclock;
@@ -26,7 +26,7 @@ pub mod pit;
 /// synchronization.
 pub trait ClockSource {
     /// Checks whether the clock source is present in the system.
-    fn present(&self) -> bool;
+    fn is_present(&self) -> bool;
 
     /// Returns count of TSC ticks elapsed in 10ms.
     fn measure_tsc_ticks(&self) -> u64;

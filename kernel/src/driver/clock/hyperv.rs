@@ -7,8 +7,8 @@
 //! during system clock initialization.
 //!
 //! Used only for one-shot calibration at boot; the MSR is not polled at runtime.
-//!
-use core::arch::x86_64::_rdtsc;
+
+use core::{arch::x86_64::_rdtsc, hint};
 
 use raw_cpuid::{CpuId, Hypervisor};
 use x86_64::registers::model_specific::Msr;
@@ -28,7 +28,7 @@ pub struct HyperVReferenceCounter {}
 
 impl ClockSource for HyperVReferenceCounter {
     /// Checks if running under a Hyper-V hypervisor.
-    fn present(&self) -> bool {
+    fn is_present(&self) -> bool {
         CpuId::new().get_hypervisor_info().unwrap().identify() == Hypervisor::HyperV
     }
 
@@ -49,7 +49,7 @@ impl ClockSource for HyperVReferenceCounter {
                     break;
                 }
 
-                core::hint::spin_loop();
+                hint::spin_loop();
             }
 
             // Immediately capture the starting point of the CPU Time Stamp Counter (TSC).

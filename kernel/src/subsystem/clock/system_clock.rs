@@ -17,7 +17,7 @@ use core::{
     sync::atomic::{AtomicU64, Ordering},
 };
 
-use common::statistics::{average, std_dev};
+use common::{average, std_dev};
 
 use crate::{
     arch::x86::{
@@ -323,9 +323,9 @@ impl SystemClock {
 
         let mut results: [(&&str, bool, u8, u64, u64); 4] = [(&"", false, 0, 0, 0); 4];
         for (index, (name, priority, clock)) in clocksources.iter().enumerate() {
-            let present = clock.present();
+            let is_present = clock.is_present();
 
-            if !present {
+            if !is_present {
                 results[index] = (name, false, *priority, 0, 0);
 
                 continue;
@@ -344,7 +344,7 @@ impl SystemClock {
             let mean = average(&samples);
             let std_dev = std_dev(&samples).unwrap();
 
-            results[index] = (name, present, *priority, mean, std_dev);
+            results[index] = (name, is_present, *priority, mean, std_dev);
         }
 
         results
@@ -354,10 +354,11 @@ impl SystemClock {
         let best = results
             .iter()
             .filter(|(_, present, _, _, _)| *present)
-            .min_by_key(|(_, _, priority, _, _)| priority);
+            .min_by_key(|(_, _, priority, _, _)| priority)
+            .unwrap();
 
-        log::debug!("Using {} as a reliable clock source...", best.unwrap().0);
-        let tsc_frequency = best.unwrap().3; // mean
+        debug!("Using {} as a reliable clock source...", best.0);
+        let tsc_frequency = best.3; // mean
 
         let lapic_frequency = ProcessorControlBlock::current()
             .local_apic()
@@ -375,7 +376,7 @@ impl SystemClock {
 
         clock.calibrate_wall_clock();
 
-        log::debug!(
+        debug!(
             "Current datetime: {}",
             DateTime::from_unix_secs(current_unix_secs(&clock))
         );
@@ -431,7 +432,7 @@ impl SystemClock {
         let mean_mhz = (mean % 1_000_000_000) / 1_000_000;
 
         if !present {
-            log::debug!("{}: not present", name);
+            debug!("{}: not present", name);
 
             return;
         }
@@ -440,25 +441,17 @@ impl SystemClock {
             let sd_mhz = std_dev / 1_000_000;
             let sd_khz = (std_dev % 1_000_000) / 1_000;
 
-            log::debug!(
+            debug!(
                 "{}: mean = {}.{:03} GHz, std dev = {}.{:03} MHz",
-                name,
-                mean_ghz,
-                mean_mhz,
-                sd_mhz,
-                sd_khz
+                name, mean_ghz, mean_mhz, sd_mhz, sd_khz
             );
         } else {
             let sd_khz = std_dev / 1_000;
             let sd_hz = std_dev % 1_000;
 
-            log::debug!(
+            debug!(
                 "{}: mean = {}.{:03} GHz, std dev = {}.{:03} kHz",
-                name,
-                mean_ghz,
-                mean_mhz,
-                sd_khz,
-                sd_hz
+                name, mean_ghz, mean_mhz, sd_khz, sd_hz
             );
         }
     }

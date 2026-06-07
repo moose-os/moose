@@ -1,16 +1,13 @@
 use core::{
-    arch::{
-        asm,
-        x86_64::{__cpuid, _rdtsc},
-    },
-    ptr,
+    arch::{asm, x86_64::_rdtsc},
+    hint, ptr,
 };
 
+use raw_cpuid::CpuId;
 use spin::RwLock;
-use x86_64::{
-    PhysAddr,
-    registers::control::{Cr3, Cr3Flags, Cr4, Cr4Flags},
-    structures::paging::{PhysFrame, Size4KiB},
+use x86_64::registers::{
+    control::{Cr4, Cr4Flags},
+    model_specific::Msr,
 };
 
 use crate::{
@@ -136,7 +133,10 @@ impl LocalApic {
 
         let apic = LocalApic {
             local_apic_base: local_apic_base_virtual.as_u64(),
-            x2apic: Self::is_x2apic_supported(),
+            x2apic: CpuId::new()
+                .get_feature_info()
+                .map(|features| features.has_x2apic())
+                .unwrap_or(false),
         };
 
         // Enable Local APIC
@@ -151,13 +151,6 @@ impl LocalApic {
         apic.write_register(LOCAL_APIC_LVT_ERROR_REGISTER, 0x1F);
 
         apic
-    }
-
-    fn is_x2apic_supported() -> bool {
-        let result = __cpuid(1);
-        let x2apic_mask = 1 << 21;
-
-        (result.ecx & x2apic_mask) != 0
     }
 
     pub fn calculate_lapic_frequency(&self, tsc_frequency_hz: u64) -> u64 {
@@ -178,7 +171,7 @@ impl LocalApic {
 
         // Wait 10 ms
         while (unsafe { _rdtsc() } - tsc_start) < tsc_ticks_to_wait {
-            core::hint::spin_loop();
+            hint::spin_loop();
         }
 
         // Get the LAPIC counter just after 10ms.
@@ -218,21 +211,11 @@ impl LocalApic {
     pub(crate) fn read_register(&self, register: u32) -> u32 {
         if self.x2apic {
             let msr = 0x800 + (register >> 4);
-            let low: u32;
-            let _high: u32;
 
-            unsafe {
-                asm!(
-                    "rdmsr",
-                    in("ecx") msr,
-                    out("eax") low,
-                    out("edx") _high,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
-            low
+            unsafe { Msr::new(msr).read() as u32 }
         } else {
             let ptr = (self.local_apic_base + register as u64) as *mut u32;
+
             unsafe { ptr::read_volatile(ptr) }
         }
     }
@@ -241,20 +224,11 @@ impl LocalApic {
     pub(crate) fn write_register(&self, register: u32, value: u32) {
         if self.x2apic {
             let msr = 0x800 + (register >> 4);
-            let low = value;
-            let high = 0u32;
 
-            unsafe {
-                asm!(
-                    "wrmsr",
-                    in("ecx") msr,
-                    in("eax") low,
-                    in("edx") high,
-                    options(nomem, nostack, preserves_flags)
-                );
-            }
+            unsafe { Msr::new(msr).write(value as u64) }
         } else {
             let ptr = (self.local_apic_base + register as u64) as *mut u32;
+
             unsafe { ptr::write_volatile(ptr, value) }
         }
     }
@@ -307,7 +281,7 @@ macro_rules! define_raw_interrupt_handler_fn {
 
                 // call the rust handler
                 "mov rdi, rsp",
-                concat!("call ", stringify!($handler)),
+                "call {handler}",
 
                 // restore segment bases
                 "mov rax, [rsp + {fs_offset}]", "wrfsbase rax",
@@ -340,29 +314,30 @@ macro_rules! define_raw_interrupt_handler_fn {
                 "add rsp, {regs_size}",
                 "iretq",
 
-                regs_size    = const(core::mem::size_of::<Registers>()),
-                rax_offset   = const(core::mem::offset_of!(Registers, rax)),
-                rbx_offset   = const(core::mem::offset_of!(Registers, rbx)),
-                rcx_offset   = const(core::mem::offset_of!(Registers, rcx)),
-                rdx_offset   = const(core::mem::offset_of!(Registers, rdx)),
-                rsi_offset   = const(core::mem::offset_of!(Registers, rsi)),
-                rdi_offset   = const(core::mem::offset_of!(Registers, rdi)),
-                rbp_offset   = const(core::mem::offset_of!(Registers, rbp)),
-                rsp_offset   = const(core::mem::offset_of!(Registers, rsp)),
-                r8_offset    = const(core::mem::offset_of!(Registers, r8)),
-                r9_offset    = const(core::mem::offset_of!(Registers, r9)),
-                r10_offset   = const(core::mem::offset_of!(Registers, r10)),
-                r11_offset   = const(core::mem::offset_of!(Registers, r11)),
-                r12_offset   = const(core::mem::offset_of!(Registers, r12)),
-                r13_offset   = const(core::mem::offset_of!(Registers, r13)),
-                r14_offset   = const(core::mem::offset_of!(Registers, r14)),
-                r15_offset   = const(core::mem::offset_of!(Registers, r15)),
-                rip_offset   = const(core::mem::offset_of!(Registers, rip)),
+                regs_size     = const(core::mem::size_of::<Registers>()),
+                rax_offset    = const(core::mem::offset_of!(Registers, rax)),
+                rbx_offset    = const(core::mem::offset_of!(Registers, rbx)),
+                rcx_offset    = const(core::mem::offset_of!(Registers, rcx)),
+                rdx_offset    = const(core::mem::offset_of!(Registers, rdx)),
+                rsi_offset    = const(core::mem::offset_of!(Registers, rsi)),
+                rdi_offset    = const(core::mem::offset_of!(Registers, rdi)),
+                rbp_offset    = const(core::mem::offset_of!(Registers, rbp)),
+                rsp_offset    = const(core::mem::offset_of!(Registers, rsp)),
+                r8_offset     = const(core::mem::offset_of!(Registers, r8)),
+                r9_offset     = const(core::mem::offset_of!(Registers, r9)),
+                r10_offset    = const(core::mem::offset_of!(Registers, r10)),
+                r11_offset    = const(core::mem::offset_of!(Registers, r11)),
+                r12_offset    = const(core::mem::offset_of!(Registers, r12)),
+                r13_offset    = const(core::mem::offset_of!(Registers, r13)),
+                r14_offset    = const(core::mem::offset_of!(Registers, r14)),
+                r15_offset    = const(core::mem::offset_of!(Registers, r15)),
+                rip_offset    = const(core::mem::offset_of!(Registers, rip)),
                 rflags_offset = const(core::mem::offset_of!(Registers, rflags)),
-                cs_offset    = const(core::mem::offset_of!(Registers, cs)),
-                ss_offset    = const(core::mem::offset_of!(Registers, ss)),
-                fs_offset    = const(core::mem::offset_of!(Registers, fs)),
-                gs_offset    = const(core::mem::offset_of!(Registers, gs)),
+                cs_offset     = const(core::mem::offset_of!(Registers, cs)),
+                ss_offset     = const(core::mem::offset_of!(Registers, ss)),
+                fs_offset     = const(core::mem::offset_of!(Registers, fs)),
+                gs_offset     = const(core::mem::offset_of!(Registers, gs)),
+                handler       = sym $handler,
             )
         }
     };
@@ -374,8 +349,6 @@ define_raw_interrupt_handler_fn!(raw_yield_handler, yield_handler);
 
 #[unsafe(no_mangle)]
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
-    let mut pt = Cr3::read().0.start_address().as_u64();
-
     let now = kernel_ref().clock().monotonic_ns();
     let mut timers = ProcessorControlBlock::current().hr_timers.write();
     let mut need_reschedule = false;
@@ -405,7 +378,6 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
 
     if need_reschedule {
         scheduler::run(registers);
-        pt = current_thread().0.process.0.page_table_physical_address;
     }
 
     // SAFETY: There is always going to be at least one (scheduler) timer
@@ -414,33 +386,22 @@ extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
     let current_time = clock.monotonic_ns();
 
     let diff = next_expiration.saturating_sub(current_time).max(1);
-
     let ticks = clock.ns_to_apic_ticks(diff);
 
-    ProcessorControlBlock::current()
-        .local_apic()
-        .set_timer(ticks);
-
-    ProcessorControlBlock::current()
-        .local_apic()
-        .signal_end_of_interrupt();
-
-    let frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(pt)).unwrap();
-
-    unsafe {
-        Cr3::write(frame, Cr3Flags::empty());
-    }
+    let lapic = ProcessorControlBlock::current().local_apic();
+    lapic.set_timer(ticks);
+    lapic.signal_end_of_interrupt();
 }
 
 #[unsafe(no_mangle)]
 extern "C" fn syscall_interrupt_handler(registers: *mut Registers) {
-    let regs = unsafe { &*registers };
+    let registers = unsafe { &mut *registers };
 
     // Keep the process page table active while dispatching syscalls so user
     // pointers remain accessible. write_syscall switches to the kernel page
     // table only for the parts that touch kernel memory.
-    match regs.rax {
-        1 => write_syscall(regs.rdi, regs.rsi as *const u8, regs.rdx),
+    match registers.rax {
+        1 => write_syscall(registers.rdi, registers.rsi as *const u8, registers.rdx),
         _ => unimplemented!(),
     };
 

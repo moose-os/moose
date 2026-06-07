@@ -8,28 +8,6 @@ use core::cmp::Ordering;
 
 use generational_arena::{Arena, Index as ArenaIndex};
 
-/// Node color in the red-black tree.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Color {
-    /// Red node (may not be adjacent to another red node).
-    Red,
-    /// Black node (root is always black).
-    Black,
-}
-
-/// A single tree node. Internal links are crate-private; keys and values are public
-/// for callers that store handles (e.g. cancel-by-index).
-pub struct Node<K, V> {
-    /// Sort key.
-    pub key: K,
-    /// Associated value.
-    pub value: V,
-    pub(crate) color: Color,
-    pub(crate) parent: Option<ArenaIndex>,
-    pub(crate) left: Option<ArenaIndex>,
-    pub(crate) right: Option<ArenaIndex>,
-}
-
 /// Ordered map implemented as a red-black binary search tree in a generational arena.
 ///
 /// Stable [`ArenaIndex`] values survive unrelated insertions until the node is removed.
@@ -37,26 +15,6 @@ pub struct RedBlackTree<K, V> {
     arena: Arena<Node<K, V>>,
     root: Option<ArenaIndex>,
     len: usize,
-}
-
-/// Which child slot of a parent (`left` or `right`).
-///
-/// Fixup code is written once for the [`Branch::Left`] configuration; the [`Branch::Right`]
-/// case reuses the same logic with `branch` and `branch.opposite()` swapped.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Branch {
-    Left,
-    Right,
-}
-
-impl Branch {
-    /// Returns the other child direction.
-    const fn opposite(self) -> Self {
-        match self {
-            Branch::Left => Branch::Right,
-            Branch::Right => Branch::Left,
-        }
-    }
 }
 
 impl<K: Ord, V> RedBlackTree<K, V> {
@@ -660,5 +618,47 @@ impl<K: Ord, V> RedBlackTree<K, V> {
 impl<K: Ord, V> Default for RedBlackTree<K, V> {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// A single tree node. Internal links are crate-private; keys and values are public
+/// for callers that store handles (e.g. cancel-by-index).
+pub struct Node<K, V> {
+    /// Sort key.
+    pub key: K,
+    /// Associated value.
+    pub value: V,
+    pub(crate) color: Color,
+    pub(crate) parent: Option<ArenaIndex>,
+    pub(crate) left: Option<ArenaIndex>,
+    pub(crate) right: Option<ArenaIndex>,
+}
+
+/// Node color in the red-black tree.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Color {
+    /// Red node (may not be adjacent to another red node).
+    Red,
+    /// Black node (root is always black).
+    Black,
+}
+
+/// Which child slot of a parent (`left` or `right`).
+///
+/// Fixup code is written once for the [`Branch::Left`] configuration; the [`Branch::Right`]
+/// case reuses the same logic with `branch` and `branch.opposite()` swapped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Branch {
+    Left,
+    Right,
+}
+
+impl Branch {
+    /// Returns the other child direction.
+    const fn opposite(self) -> Self {
+        match self {
+            Branch::Left => Branch::Right,
+            Branch::Right => Branch::Left,
+        }
     }
 }

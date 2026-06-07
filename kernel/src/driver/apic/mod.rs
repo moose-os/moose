@@ -5,7 +5,7 @@ pub use io_apic::*;
 pub use local_apic::*;
 
 use alloc::{alloc::alloc_zeroed, vec::Vec};
-use core::{alloc::Layout, arch::asm, hint::spin_loop, ptr};
+use core::{alloc::Layout, arch::asm, hint, ptr};
 
 use raw_cpuid::CpuId;
 use spin::Mutex;
@@ -205,7 +205,7 @@ impl Apic {
                 self.boot_processor(local_apic, entry.apic_id);
 
                 while without_interrupts(|| *AP_STARTUP_SPINLOCK.read() == 0) {
-                    spin_loop();
+                    hint::spin_loop();
                 }
             });
     }
