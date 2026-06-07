@@ -13,7 +13,7 @@ use crate::subsystem::memory::{
     memory_manager,
 };
 
-pub(crate) const HEAP_START: usize = 0x4444_4444_0000;
+pub(crate) const HEAP_START: usize = 0xffffffff82220000;
 const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;
 
 #[global_allocator]

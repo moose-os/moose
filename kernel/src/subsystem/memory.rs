@@ -2,6 +2,7 @@ use core::{
     fmt::Debug,
     ops::{Index, IndexMut},
     ptr,
+    range::Range,
 };
 
 use bitflags::bitflags;
@@ -83,6 +84,7 @@ impl MemoryManager {
     pub unsafe fn map_any_contiguous(
         &mut self,
         target: impl Into<MapTarget>,
+        level_4_page_table_entry_idx_range: Range<usize>,
         frame_range: FrameRange,
         page_flags: PageFlags,
     ) -> PageRange {
@@ -98,7 +100,7 @@ impl MemoryManager {
         let mut current_sequence_start = None;
         let mut current_sequence_length = 0;
 
-        'outer: for level_4_page_table_entry_index in 0..512 {
+        'outer: for level_4_page_table_entry_index in level_4_page_table_entry_idx_range {
             let level_4_page_table_entry =
                 &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
 
@@ -311,10 +313,14 @@ impl MemoryManager {
                 | ((level_1_page_table_entry_index as u64) << 12);
 
             if steps == frame_range.n() {
+                let address = sign_extend(address);
+
                 start_address = VirtualAddress::new(address);
             }
 
             if steps == 1 {
+                let address = sign_extend(address);
+
                 end_address = VirtualAddress::new(address);
             }
 
@@ -519,8 +525,13 @@ impl MemoryManager {
                 self.map_inner(page_table, page, &frame, page_flags)
                     .map(|_| MapResult { page: *page, frame })
             }
-            Map::Any(frame) => {
-                let page = self.map_any_inner(page_table, frame, page_flags);
+            Map::Any(frame, level_4_page_table_entry_idx_range) => {
+                let page = self.map_any_inner(
+                    page_table,
+                    level_4_page_table_entry_idx_range,
+                    frame,
+                    page_flags,
+                );
 
                 Ok(MapResult {
                     page,
@@ -539,7 +550,7 @@ impl MemoryManager {
     ) -> Result<(), MemoryError> {
         let address = page.address();
 
-        assert!(address.as_u64() < (1 << 48));
+        assert!(address.as_u64() == sign_extend(address.as_u64()));
 
         // | 63 | ... | 49 | 48 | ... | 40 | 39 | ... | 31 | 30 | ... | 22 | 21 | ... | 12 | 11 | ... | 0 |
         // | Unused        | Page level 4  | Page level 3  | Page level 2  | Page level 1  | 4 KiB offset |
@@ -675,10 +686,11 @@ impl MemoryManager {
     fn map_any_inner(
         &mut self,
         level_4_page_table: *mut PageTable,
+        level_4_page_table_entry_idx_range: Range<usize>,
         frame: &Frame,
         page_flags: PageFlags,
     ) -> Page {
-        for level_4_page_table_entry_index in 0..512 {
+        for level_4_page_table_entry_index in level_4_page_table_entry_idx_range {
             let level_4_page_table_entry =
                 &mut unsafe { &mut *level_4_page_table }[level_4_page_table_entry_index];
 
@@ -813,10 +825,12 @@ impl MemoryManager {
                             );
                         }
 
-                        let address = ((level_4_page_table_entry_index as u64) << 39)
-                            | ((level_3_page_table_entry_index as u64) << 30)
-                            | ((level_2_page_table_entry_index as u64) << 21)
-                            | ((level_1_page_table_entry_index as u64) << 12);
+                        let address = sign_extend(
+                            ((level_4_page_table_entry_index as u64) << 39)
+                                | ((level_3_page_table_entry_index as u64) << 30)
+                                | ((level_2_page_table_entry_index as u64) << 21)
+                                | ((level_1_page_table_entry_index as u64) << 12),
+                        );
 
                         return Page::new(VirtualAddress::new(address));
                     }
@@ -1039,6 +1053,7 @@ pub struct MapResult {
 pub enum MapTarget {
     CurrentAddressSpace(),
     CustomAddressSpace(*mut PageTable),
+    //TopLevelPageTableEntry(*mut PageTable),
 }
 
 pub struct CurrentAddressSpace;
@@ -1062,7 +1077,7 @@ impl From<AddressSpace> for MapTarget {
 pub enum Map<'a> {
     Exact(&'a Page, &'a Frame),
     Identity(&'a Page),
-    Any(&'a Frame),
+    Any(&'a Frame, Range<usize>),
 }
 
 pub struct Exact<'a>(pub &'a Page, pub &'a Frame);
@@ -1087,7 +1102,21 @@ pub struct Any<'a>(pub &'a Frame);
 
 impl<'a> From<Any<'a>> for Map<'a> {
     fn from(value: Any<'a>) -> Self {
-        Self::Any(value.0)
+        Self::Any(value.0, Range { start: 0, end: 512 })
+    }
+}
+
+pub struct AnyIn<'a>(pub &'a Frame, pub core::ops::Range<usize>);
+
+impl<'a> From<AnyIn<'a>> for Map<'a> {
+    fn from(value: AnyIn<'a>) -> Self {
+        Self::Any(
+            value.0,
+            Range {
+                start: value.1.start,
+                end: value.1.end,
+            },
+        )
     }
 }
 
@@ -1467,4 +1496,11 @@ pub unsafe fn current_page_table(physical_memory_offset: u64) -> *mut PageTable 
     let virtual_address = physical_memory_offset + physical_address.as_u64();
 
     virtual_address as *mut PageTable
+}
+
+// Converts a potentially non-canonical address into a canonical one
+#[inline(always)]
+fn sign_extend(address: u64) -> u64 {
+    // Shifts bit 47 to the highest position and then shifts right, which copies the bit over
+    (((address as i64) << 16) >> 16) as u64
 }

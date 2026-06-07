@@ -7,7 +7,7 @@ use x86_64::registers::control::Cr2;
 
 use crate::subsystem::syscall::write_syscall;
 
-use super::{gdt::KERNEL_MODE_CODE_SEGMENT_INDEX, use_kernel_page_table};
+use super::gdt::KERNEL_MODE_CODE_SEGMENT_INDEX;
 
 const_assert!(size_of::<Idt>() == 256 * 16);
 
@@ -437,7 +437,6 @@ pub struct ExceptionFrame {
     ss: usize,
 }
 
-#[derive(Debug)]
 #[repr(C)]
 pub struct ErrorCodeExceptionFrame {
     error_code: usize,
@@ -446,6 +445,19 @@ pub struct ErrorCodeExceptionFrame {
     rflags: usize,
     rsp: usize,
     ss: usize,
+}
+
+impl core::fmt::Debug for ErrorCodeExceptionFrame {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ErrorCodeExceptionFrame")
+            .field("error_code", &self.error_code)
+            .field("rip", &format_args!("0x{:08x}", self.rip))
+            .field("cs", &self.cs)
+            .field("rflags", &self.rflags)
+            .field("rsp", &format_args!("0x{:08x}", self.rsp))
+            .field("ss", &self.ss)
+            .finish()
+    }
 }
 
 /// Volatile (caller-saved) registers in the 64-bit SysV calling convention.
@@ -488,25 +500,21 @@ extern "C" fn interrupt_handler<const N: usize>(
     frame: &ExceptionFrame,
     registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        let interrupt_handlers = unsafe { &REGISTERED_INTERRUPT_HANDLERS[N] };
+    let interrupt_handlers = unsafe { &REGISTERED_INTERRUPT_HANDLERS[N] };
 
-        if interrupt_handlers.is_empty() {
-            warn!("Interrupt without any handlers was invoked");
-        }
+    if interrupt_handlers.is_empty() {
+        warn!("Interrupt without any handlers was invoked");
+    }
 
-        for interrupt_handler in interrupt_handlers {
-            interrupt_handler.call(frame, registers);
-        }
-    });
+    for interrupt_handler in interrupt_handlers {
+        interrupt_handler.call(frame, registers);
+    }
 }
 
 extern "C" fn division_error_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        warn!("Division error");
+    warn!("Division error");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -514,38 +522,30 @@ extern "C" fn division_error_handler(frame: &ExceptionFrame, _registers: &Volati
 }
 
 extern "C" fn debug_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        info!("Debug");
+    info!("Debug");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 }
 
 extern "C" fn non_maskable_interrupt_handler(
     frame: &ExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        info!("Non-maskable interrupt");
+    info!("Non-maskable interrupt");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 }
 
 extern "C" fn breakpoint_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        info!("Breakpoint");
+    info!("Breakpoint");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 }
 
 extern "C" fn overflow_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        warn!("Overflow");
+    warn!("Overflow");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -553,11 +553,9 @@ extern "C" fn overflow_handler(frame: &ExceptionFrame, _registers: &VolatileRegi
 }
 
 extern "C" fn bound_range_exceeded_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        warn!("Bound range exceeded");
+    warn!("Bound range exceeded");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -565,11 +563,9 @@ extern "C" fn bound_range_exceeded_handler(frame: &ExceptionFrame, _registers: &
 }
 
 extern "C" fn invalid_opcode_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        warn!("Invalid opcode");
+    warn!("Invalid opcode");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -577,11 +573,9 @@ extern "C" fn invalid_opcode_handler(frame: &ExceptionFrame, _registers: &Volati
 }
 
 extern "C" fn device_not_available_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        warn!("Device not available");
+    warn!("Device not available");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -592,11 +586,9 @@ extern "C" fn double_fault_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) -> ! {
-    use_kernel_page_table(|| {
-        error!("Double fault");
+    error!("Double fault");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -604,11 +596,9 @@ extern "C" fn double_fault_handler(
 }
 
 extern "C" fn invalid_tss_handler(frame: &ErrorCodeExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        warn!("Invalid TSS");
+    warn!("Invalid TSS");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -619,11 +609,9 @@ extern "C" fn segment_not_present_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("Segment not present");
+    warn!("Segment not present");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -634,11 +622,9 @@ extern "C" fn stack_segment_fault_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("Stack segment fault");
+    warn!("Stack segment fault");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -649,17 +635,15 @@ extern "C" fn general_protection_fault_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("General protection fault");
+    warn!("General protection fault");
 
-        info!("Stack frame: {frame:#?}");
+    info!("Stack frame: {frame:#?}");
 
-        if frame.error_code != 0 {
-            info!("Is external: {}", frame.error_code & 1 == 1);
-            info!("GDT/IDT/LDT/IDT: {}", (frame.error_code >> 1) & 0b11);
-            info!("Segment selector index: {}", frame.error_code >> 3);
-        }
-    });
+    if frame.error_code != 0 {
+        info!("Is external: {}", frame.error_code & 1 == 1);
+        info!("GDT/IDT/LDT/IDT: {}", (frame.error_code >> 1) & 0b11);
+        info!("Segment selector index: {}", frame.error_code >> 3);
+    }
 
     loop {
         x86_64::instructions::hlt();
@@ -667,17 +651,15 @@ extern "C" fn general_protection_fault_handler(
 }
 
 extern "C" fn page_fault_handler(frame: &ErrorCodeExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        error!("Page fault");
+    error!("Page fault");
 
-        if let Ok(address) = Cr2::read() {
-            error!("Accessed virtual address: {:#0x}", address.as_u64());
-        } else {
-            error!("Accessed unknown virtual address");
-        }
+    if let Ok(address) = Cr2::read() {
+        error!("Accessed virtual address: {:#0x}", address.as_u64());
+    } else {
+        error!("Accessed unknown virtual address");
+    }
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         unsafe {
@@ -690,11 +672,9 @@ extern "C" fn x87_floating_point_exception_handler(
     frame: &ExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("x87 floating point exception");
+    warn!("x87 floating point exception");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -705,11 +685,9 @@ extern "C" fn alignment_check_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("Alignment check");
+    warn!("Alignment check");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -717,11 +695,9 @@ extern "C" fn alignment_check_handler(
 }
 
 extern "C" fn machine_check_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) -> ! {
-    use_kernel_page_table(|| {
-        warn!("Machine check");
+    warn!("Machine check");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -732,11 +708,9 @@ extern "C" fn simd_floating_point_exception_handler(
     frame: &ExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("SIMD floating point exception");
+    warn!("SIMD floating point exception");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -747,11 +721,9 @@ extern "C" fn virtualization_exception_handler(
     frame: &ExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("Virtualization exception");
+    warn!("Virtualization exception");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -762,11 +734,9 @@ extern "C" fn control_protection_exception_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("Control protection exception");
+    warn!("Control protection exception");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -777,11 +747,9 @@ extern "C" fn vmm_communication_exception_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("VMM communication exception");
+    warn!("VMM communication exception");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -792,11 +760,9 @@ extern "C" fn security_exception_handler(
     frame: &ErrorCodeExceptionFrame,
     _registers: &VolatileRegisters,
 ) {
-    use_kernel_page_table(|| {
-        warn!("Security exception");
+    warn!("Security exception");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();
@@ -823,11 +789,9 @@ extern "C" fn syscall_handler(_frame: &ExceptionFrame, registers: &VolatileRegis
 }
 
 extern "C" fn unknown_interrupt_handler(frame: &ExceptionFrame, _registers: &VolatileRegisters) {
-    use_kernel_page_table(|| {
-        info!("Unknown interrupt");
+    info!("Unknown interrupt");
 
-        info!("Stack frame: {frame:?}");
-    });
+    info!("Stack frame: {frame:?}");
 
     loop {
         x86_64::instructions::hlt();

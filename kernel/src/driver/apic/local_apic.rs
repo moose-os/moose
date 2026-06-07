@@ -14,14 +14,11 @@ use crate::{
         cpu::ProcessorControlBlock,
         gdt::{load_tss, setup_tss},
         idt::IDT,
-        perform_arch_initialization, use_kernel_page_table,
+        perform_arch_initialization,
     },
     kernel::{Kernel, kernel_ref},
     subsystem::{
-        memory::{
-            CurrentAddressSpace, Identity, MemoryError, Page, PageFlags, VirtualAddress,
-            memory_manager,
-        },
+        memory::{AnyIn, CurrentAddressSpace, Frame, PageFlags, PhysicalAddress, memory_manager},
         process::{Registers, Status},
         scheduler,
     },
@@ -109,31 +106,30 @@ impl LocalApic {
     pub fn initialize_for_current_processor() -> LocalApic {
         let apic_base =
             unsafe { x86_64::registers::model_specific::Msr::new(IA32_APIC_BASE_MSR).read() };
-        let local_apic_base = apic_base & APIC_BASE_MSR_APIC_BASE_FIELD_MASK;
+        let local_apic_base_physical =
+            PhysicalAddress::new(apic_base & APIC_BASE_MSR_APIC_BASE_FIELD_MASK);
 
-        // Make sure local apic base is mapped into memory
-        // It is always on 4KiB boundary
-        {
+        let local_apic_base_virtual = {
             let mut memory_manager = memory_manager().write();
 
-            let local_apic_base_page = Page::new(VirtualAddress::new(local_apic_base));
+            let frame = Frame::new(local_apic_base_physical);
 
-            match unsafe {
-                memory_manager.map(
-                    CurrentAddressSpace,
-                    Identity(&local_apic_base_page),
-                    PageFlags::WRITABLE | PageFlags::WRITE_THROUGH | PageFlags::DISABLE_CACHING,
-                )
-            } {
-                Ok(_) => {}
-                Err(MemoryError::AlreadyMapped) => {}
-                Err(err) => {
-                    panic!("{}", err);
-                }
+            unsafe {
+                memory_manager
+                    .map(
+                        CurrentAddressSpace,
+                        AnyIn(&frame, 256..512),
+                        PageFlags::WRITABLE | PageFlags::WRITE_THROUGH | PageFlags::DISABLE_CACHING,
+                    )
+                    .expect("Map any failed")
+                    .page
+                    .address()
             }
-        }
+        };
 
-        let apic = LocalApic { local_apic_base };
+        let apic = LocalApic {
+            local_apic_base: local_apic_base_virtual.as_u64(),
+        };
 
         // Enable Local APIC
         //
@@ -345,43 +341,41 @@ pub(crate) extern "C" fn raw_timer_interrupt_handler() -> ! {
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
     scheduler::run(registers);
 
-    use_kernel_page_table(|| {
-        let kernel = kernel_ref();
+    let kernel = kernel_ref();
 
-        // Check if the timer bit is set in LAPIC's In-Service Register (ISR).
-        // True IRQs set this bit; manual calls (yield) do not.
-        let is_hw_interrupt = ProcessorControlBlock::current()
-            .local_apic()
-            .is_isr(kernel.timer_irq());
+    // Check if the timer bit is set in LAPIC's In-Service Register (ISR).
+    // True IRQs set this bit; manual calls (yield) do not.
+    let is_hw_interrupt = ProcessorControlBlock::current()
+        .local_apic()
+        .is_isr(kernel.timer_irq());
 
-        if is_hw_interrupt {
-            // Increment internal tick counter only on bootstrap processor
-            if ProcessorControlBlock::current().is_bsp {
-                // Only increment system time on actual hardware clock ticks.
-                let current_tick_count = kernel.ticks.fetch_add(1, Ordering::SeqCst);
+    if is_hw_interrupt {
+        // Increment internal tick counter only on bootstrap processor
+        if ProcessorControlBlock::current().is_bsp {
+            // Only increment system time on actual hardware clock ticks.
+            let current_tick_count = kernel.ticks.fetch_add(1, Ordering::SeqCst);
 
-                // Process TIMEOUT_QUEUE to expire timers and wake up waiting threads
-                {
-                    let mut queue = kernel_ref().timeout_queue.lock();
+            // Process TIMEOUT_QUEUE to expire timers and wake up waiting threads
+            {
+                let mut queue = kernel_ref().timeout_queue.lock();
 
-                    // Since TIMEOUT_QUEUE is sorted by expiration time (ascending),
-                    // we only need to inspect the head of the queue. If the first
-                    // timer hasn't expired, no subsequent timers have either.
-                    // This allows an O(1) check for most ticks and O(k) for k expired threads.
-                    while queue.front().is_some_and(|(expiration_tick_count, _)| {
-                        *expiration_tick_count <= current_tick_count
-                    }) {
-                        let (_, thread) = queue.pop_front().unwrap();
-                        thread.set_status(Status::Running);
-                    }
+                // Since TIMEOUT_QUEUE is sorted by expiration time (ascending),
+                // we only need to inspect the head of the queue. If the first
+                // timer hasn't expired, no subsequent timers have either.
+                // This allows an O(1) check for most ticks and O(k) for k expired threads.
+                while queue.front().is_some_and(|(expiration_tick_count, _)| {
+                    *expiration_tick_count <= current_tick_count
+                }) {
+                    let (_, thread) = queue.pop_front().unwrap();
+                    thread.set_status(Status::Running);
                 }
             }
-
-            // EOI is mandatory for hardware IRQs to allow further interrupts,
-            // but must be avoided for software-triggered calls.
-            (*ProcessorControlBlock::current())
-                .local_apic()
-                .signal_end_of_interrupt();
         }
-    });
+
+        // EOI is mandatory for hardware IRQs to allow further interrupts,
+        // but must be avoided for software-triggered calls.
+        (*ProcessorControlBlock::current())
+            .local_apic()
+            .signal_end_of_interrupt();
+    }
 }

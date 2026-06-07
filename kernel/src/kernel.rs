@@ -17,10 +17,7 @@ use x86_64::{
 };
 
 use crate::{
-    arch::{
-        irq::{IrqAllocator, IrqLevel},
-        x86::{InterruptStack, cpu::MAXIMUM_CPU_CORES, gdt::TSS},
-    },
+    arch::irq::{IrqAllocator, IrqLevel},
     driver::{
         acpi::{Acpi, Device, create_device_list},
         apic::Apic,
@@ -31,13 +28,12 @@ use crate::{
         vga::Vga,
     },
     subsystem::{
-        allocator::{HEAP_START, initialize_heap},
+        allocator::initialize_heap,
         boot::limine::LimineBootContext,
         linker::Linker,
         memory::{
-            AddressSpace, Any, CurrentAddressSpace, Exact, Frame, FrameAllocator, MemoryManager,
-            PAGE_SIZE, Page, PageFlags, PageTable, PhysicalAddress, VirtualAddress,
-            current_page_table, memory_manager,
+            AddressSpace, Exact, Frame, FrameAllocator, MemoryManager, PAGE_SIZE, Page, PageFlags,
+            PageTable, VirtualAddress, memory_manager,
         },
         process::{
             HIGHEST_THREAD_PRIORITY, Process, ProcessInner, Registers, Status, Thread, ThreadInner,
@@ -53,8 +49,9 @@ static KERNEL: Kernel = Kernel::new();
 pub struct Kernel {
     pub boot_context: Once<LimineBootContext>,
 
-    pub kernel_page_table_physical_address: Once<u64>,
     pub kernel_page_table: Once<NonNull<PageTable>>,
+    pub kernel_page_table_physical_address: Once<u64>,
+
     pub memory_manager: Once<RwLock<MemoryManager>>,
 
     pub bsp_stack: Once<u64>,
@@ -95,8 +92,9 @@ impl Kernel {
         Self {
             boot_context: Once::new(),
 
-            kernel_page_table_physical_address: Once::new(),
             kernel_page_table: Once::new(),
+            kernel_page_table_physical_address: Once::new(),
+
             memory_manager: Once::new(),
 
             bsp_stack: Once::new(),
@@ -133,10 +131,9 @@ impl Kernel {
     // |----------------|
 
     pub(crate) fn initialize_memory(&self) {
-        self.retrieve_kernel_page_table_physical_address();
+        self.resolve_kernel_page_table();
         self.initialize_memory_manager();
         initialize_heap().expect("Failed to initialize heap");
-        self.map_kernel_page_table();
     }
 
     pub(crate) fn initialize_memory_manager(&self) {
@@ -152,33 +149,25 @@ impl Kernel {
         });
     }
 
-    pub(crate) fn map_kernel_page_table(&self) {
-        let page_table_virtual_address = {
-            let mut memory_manager = memory_manager().write();
+    pub(crate) fn resolve_kernel_page_table(&self) {
+        let physical_memory_offset = self.boot_context().physical_memory_offset;
 
-            let frame = Frame::new(PhysicalAddress::new(
-                self.kernel_page_table_physical_address(),
-            ));
+        let kernel_page_table_physical_address = Cr3::read().0.start_address().as_u64();
 
-            unsafe { memory_manager.map(CurrentAddressSpace, Any(&frame), PageFlags::empty()) }
-                .unwrap()
-                .page
-                .address()
-        };
+        self.kernel_page_table_physical_address
+            .call_once(|| kernel_page_table_physical_address);
 
-        self.kernel_page_table.call_once(|| {
-            NonNull::new(page_table_virtual_address.as_mut_ptr())
-                .expect("page_table_virtual_address was zero")
-        });
+        let kernel_page_table_virtual_address =
+            VirtualAddress::new(kernel_page_table_physical_address + physical_memory_offset);
+        let kernel_page_table: NonNull<PageTable> =
+            NonNull::new(kernel_page_table_virtual_address.as_mut_ptr())
+                .expect("kernel_page_table_virtual_address was zero");
+
+        self.kernel_page_table.call_once(|| kernel_page_table);
     }
 
     pub(crate) fn retrieve_gdt(&self) {
         self.gdt.call_once(x86_64::instructions::tables::sgdt);
-    }
-
-    pub(crate) fn retrieve_kernel_page_table_physical_address(&self) {
-        self.kernel_page_table_physical_address
-            .call_once(|| Cr3::read().0.start_address().as_u64());
     }
 
     pub(crate) fn gather_boot_context(&self) {
@@ -252,18 +241,7 @@ impl Kernel {
             .current_usable_process_id
             .fetch_add(1, Ordering::SeqCst);
 
-        let page_table_physical_address = {
-            let memory_manager = memory_manager().read();
-
-            memory_manager
-                .translate_virtual_address_to_physical_for_current_address_space(
-                    VirtualAddress::new(
-                        unsafe { self.kernel_page_table().as_mut() } as *mut _ as u64
-                    ),
-                )
-                .unwrap()
-                .as_u64()
-        };
+        let page_table_physical_address = self.kernel_page_table_physical_address();
 
         processes.push(Process(Arc::new(ProcessInner {
             id: process_id,
@@ -284,7 +262,7 @@ impl Kernel {
 
         let stack = unsafe { ThreadStack::allocate() };
 
-        let mut program_page_table = self.create_address_space(self.bsp_stack());
+        let mut program_page_table = self.create_address_space();
 
         let mut memory_manager = memory_manager().write();
 
@@ -416,99 +394,18 @@ impl Kernel {
         Ok(thread)
     }
 
-    pub fn create_address_space(&self, kernel_stack: u64) -> Box<PageTable> {
+    pub fn create_address_space(&self) -> Box<PageTable> {
         let mut page_table = Box::new(PageTable::new());
 
-        let kernel_virtual_base_address = self.boot_context().kernel_virtual_base_address;
-        let physical_memory_offset = self.boot_context().physical_memory_offset;
+        let kernel_page_table: *mut PageTable = self.kernel_page_table().as_ptr();
 
-        // map kernel in program's address space
-        {
-            let kernel_level_4_page_table_entry_index =
-                ((kernel_virtual_base_address >> 39) & 0b1_1111_1111) as usize;
-
-            let kernel_page_table = unsafe { current_page_table(physical_memory_offset) };
-
-            let level_4_page_table_entry =
-                &unsafe { &*kernel_page_table }[kernel_level_4_page_table_entry_index];
-
-            page_table[kernel_level_4_page_table_entry_index]
-                .set_address(level_4_page_table_entry.address());
-            page_table[kernel_level_4_page_table_entry_index]
-                .set_flags(level_4_page_table_entry.flags());
-        }
-
-        // map kernel's stack in program's address space
-        {
-            let kernel_page_table = unsafe { current_page_table(physical_memory_offset) };
-
-            let level_4_page_table_entry_index = ((kernel_stack >> 39) & 0b1_1111_1111) as usize;
+        for level_4_page_table_entry_index in 256..512 {
             let level_4_page_table_entry =
                 &unsafe { &*kernel_page_table }[level_4_page_table_entry_index];
 
             page_table[level_4_page_table_entry_index]
                 .set_address(level_4_page_table_entry.address());
             page_table[level_4_page_table_entry_index].set_flags(level_4_page_table_entry.flags());
-        }
-
-        // map kernel's heap in program's address space
-        {
-            let kernel_page_table = unsafe { current_page_table(physical_memory_offset) };
-
-            let level_4_page_table_entry_index = (HEAP_START >> 39) & 0b1_1111_1111;
-            let level_4_page_table_entry =
-                &unsafe { &*kernel_page_table }[level_4_page_table_entry_index];
-
-            page_table[level_4_page_table_entry_index]
-                .set_address(level_4_page_table_entry.address());
-            page_table[level_4_page_table_entry_index].set_flags(level_4_page_table_entry.flags());
-        }
-
-        let mut memory_manager = memory_manager().write();
-
-        // remap interrupt's stack in program's address space
-        {
-            let tss = TSS.lock();
-
-            for processor_idx in 0..MAXIMUM_CPU_CORES {
-                if tss[processor_idx].rsp0 == 0 {
-                    continue;
-                }
-
-                let interrupt_stack = tss[processor_idx].rsp0 as *mut InterruptStack as u64
-                    - mem::size_of::<InterruptStack>() as u64
-                    + 16;
-
-                for page_index in 0..4 {
-                    let interrupt_stack_virtual_address =
-                        VirtualAddress::new(interrupt_stack as u64 + (page_index * 4096));
-                    let interrupt_stack_physical_address = memory_manager
-                        .translate_virtual_address_to_physical_for_current_address_space(
-                            interrupt_stack_virtual_address,
-                        )
-                        .unwrap();
-
-                    unsafe {
-                        memory_manager
-                            .unmap(
-                                AddressSpace(&mut *page_table),
-                                &Page::new(interrupt_stack_virtual_address),
-                            )
-                            .unwrap();
-
-                        memory_manager
-                            .map(
-                                AddressSpace(&mut *page_table),
-                                Exact(
-                                    &Page::new(interrupt_stack_virtual_address),
-                                    &Frame::new(interrupt_stack_physical_address),
-                                ),
-                                PageFlags::WRITABLE,
-                            )
-                            .unwrap();
-                    }
-                }
-            }
         }
 
         page_table
