@@ -1110,13 +1110,7 @@ pub struct AnyIn<'a>(pub &'a Frame, pub core::ops::Range<usize>);
 
 impl<'a> From<AnyIn<'a>> for Map<'a> {
     fn from(value: AnyIn<'a>) -> Self {
-        Self::Any(
-            value.0,
-            Range {
-                start: value.1.start,
-                end: value.1.end,
-            },
-        )
+        Self::Any(value.0, value.1.into())
     }
 }
 
