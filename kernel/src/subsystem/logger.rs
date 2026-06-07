@@ -50,6 +50,15 @@ impl Log for BootLogger {
                 {
                     let mut serial = kernel.serial().lock();
 
+                    let time = kernel_ref()
+                        .clock
+                        .get()
+                        .map(|c| LoggerTime::from_mono_ns(c.monotonic_ns()));
+
+                    if let Some(t) = time {
+                        _ = write!(&mut serial, "\x1b[36m{}\x1b[0m ", t);
+                    }
+
                     if !shortened_target.is_empty() {
                         _ = writeln!(
                             &mut serial,

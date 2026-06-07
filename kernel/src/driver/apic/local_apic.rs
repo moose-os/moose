@@ -18,11 +18,12 @@ use crate::{
         asm::{disable_interrupts, enable_interrupts},
         cpu::ProcessorControlBlock,
         gdt::{load_tss, setup_tss},
-        idt::IDT,
+        idt::{IDT, TIMER_IRQ},
         perform_arch_initialization,
     },
     kernel::{Kernel, kernel_ref},
     subsystem::{
+        clock::timer::TimerAction,
         memory::{AnyIn, CurrentAddressSpace, Frame, PageFlags, PhysicalAddress, memory_manager},
         process::{Registers, Status},
         scheduler::{self, current_thread, has_current_thread},
@@ -135,6 +136,7 @@ impl LocalApic {
 
         let apic = LocalApic {
             local_apic_base: local_apic_base_virtual.as_u64(),
+            x2apic: Self::is_x2apic_supported(),
         };
 
         // Enable Local APIC
@@ -148,12 +150,6 @@ impl LocalApic {
         // Remap spurious interrupt vector register
         apic.write_register(LOCAL_APIC_LVT_ERROR_REGISTER, 0x1F);
 
-        if apic_base & APIC_BASE_MSR_BSP_FLAG != 0 {
-            // We're running first LocalAPIC initialization on the bootstrap processor and need to
-            // check the speed of APIC timer.
-            apic.check_timer_speed()
-        }
-
         apic
     }
 
@@ -162,6 +158,60 @@ impl LocalApic {
         let x2apic_mask = 1 << 21;
 
         (result.ecx & x2apic_mask) != 0
+    }
+
+    pub fn calculate_lapic_frequency(&self, tsc_frequency_hz: u64) -> u64 {
+        // Disable timer interrupts
+        self.write_register(LOCAL_APIC_LVT_TIMER_REGISTER, 0x10000);
+
+        // Set divisor to 1
+        self.write_register(LOCAL_APIC_DIVIDE_CONFIGURATION_REGISTER, 0xB);
+
+        // Calculate how many TSC ticks will pass during 10ms
+        let tsc_ticks_to_wait = tsc_frequency_hz / 100;
+
+        // Get TSC starting point
+        let tsc_start = unsafe { _rdtsc() };
+
+        // Start LAPIC timer
+        self.write_register(LOCAL_APIC_INITIAL_COUNT_REGISTER, 0xFFFFFFFF);
+
+        // Wait 10 ms
+        while (unsafe { _rdtsc() } - tsc_start) < tsc_ticks_to_wait {
+            core::hint::spin_loop();
+        }
+
+        // Get the LAPIC counter just after 10ms.
+        let lapic_end = self.read_register(LOCAL_APIC_CURRENT_COUNT_REGISTER);
+
+        // Stop LAPIC timer by writing 0 into initial count
+        self.write_register(LOCAL_APIC_INITIAL_COUNT_REGISTER, 0);
+
+        // Calculate the difference
+        let lapic_ticks_per_10ms = 0xFFFFFFFF - lapic_end;
+
+        // We measured 10ms, so need to multiply it by 100 to obtain frequency in Hz.
+        let lapic_frequency_hz = lapic_ticks_per_10ms * 100;
+
+        lapic_frequency_hz as u64
+    }
+
+    pub fn set_timer(&self, ticks: u32) {
+        self.write_register(
+            LOCAL_APIC_LVT_TIMER_REGISTER,
+            TIMER_IRQ as u32 | LOCAL_APIC_TIMER_ONESHOT,
+        );
+
+        // Start the timer
+        self.write_register(LOCAL_APIC_INITIAL_COUNT_REGISTER, ticks);
+    }
+
+    pub fn signal_end_of_interrupt(&self) {
+        self.write_register(LOCAL_APIC_END_OF_INTERRUPT_REGISTER, 0);
+    }
+
+    pub fn reset_error_register(&self) {
+        self.write_register(LOCAL_APIC_ERROR_STATUS_REGISTER, 0);
     }
 
     #[inline(always)]
@@ -326,56 +376,54 @@ define_raw_interrupt_handler_fn!(raw_yield_handler, yield_handler);
 extern "C" fn timer_interrupt_handler(registers: *mut Registers) {
     let mut pt = Cr3::read().0.start_address().as_u64();
 
-    use_kernel_page_table(|| {
-        let now = kernel_ref().clock().monotonic_ns();
-        let mut timers = ProcessorControlBlock::current().hr_timers.write();
-        let mut need_reschedule = false;
+    let now = kernel_ref().clock().monotonic_ns();
+    let mut timers = ProcessorControlBlock::current().hr_timers.write();
+    let mut need_reschedule = false;
 
-        while let Some(expired_timer) = timers.poll_expired(now) {
-            match expired_timer.action.clone() {
-                TimerAction::ExecuteCallback { function } => {
-                    function(registers.addr() as u64);
-                }
-                TimerAction::Reschedule => {
-                    need_reschedule = true;
-                }
-                TimerAction::WakeUp {
-                    process_id,
-                    thread_id,
-                } => {
-                    let processes = kernel_ref().processes.read();
-                    let process = processes.iter().find(|p| p.id() == process_id);
+    while let Some(expired_timer) = timers.poll_expired(now) {
+        match expired_timer.action.clone() {
+            TimerAction::ExecuteCallback { function } => {
+                function(registers.addr() as u64);
+            }
+            TimerAction::Reschedule => {
+                need_reschedule = true;
+            }
+            TimerAction::WakeUp {
+                process_id,
+                thread_id,
+            } => {
+                let processes = kernel_ref().processes.read();
+                let process = processes.iter().find(|p| p.id() == process_id);
 
-                    let threads = process.unwrap().threads();
-                    let thread = threads.iter().find(|t| t.id() == thread_id);
+                let threads = process.unwrap().threads();
+                let thread = threads.iter().find(|t| t.id() == thread_id);
 
-                    thread.unwrap().set_status(Status::Running);
-                }
-            };
-        }
+                thread.unwrap().set_status(Status::Running);
+            }
+        };
+    }
 
-        if need_reschedule {
-            scheduler::run(registers);
-            pt = current_thread().0.process.0.page_table_physical_address;
-        }
+    if need_reschedule {
+        scheduler::run(registers);
+        pt = current_thread().0.process.0.page_table_physical_address;
+    }
 
-        // SAFETY: There is always going to be at least one (scheduler) timer
-        let clock = kernel_ref().clock();
-        let next_expiration = timers.next_expiry().unwrap();
-        let current_time = clock.monotonic_ns();
+    // SAFETY: There is always going to be at least one (scheduler) timer
+    let clock = kernel_ref().clock();
+    let next_expiration = timers.next_expiry().unwrap();
+    let current_time = clock.monotonic_ns();
 
-        let diff = next_expiration.saturating_sub(current_time).max(1);
+    let diff = next_expiration.saturating_sub(current_time).max(1);
 
-        let ticks = clock.ns_to_apic_ticks(diff);
+    let ticks = clock.ns_to_apic_ticks(diff);
 
-        ProcessorControlBlock::current()
-            .local_apic()
-            .set_timer(ticks);
+    ProcessorControlBlock::current()
+        .local_apic()
+        .set_timer(ticks);
 
-        ProcessorControlBlock::current()
-            .local_apic()
-            .signal_end_of_interrupt();
-    });
+    ProcessorControlBlock::current()
+        .local_apic()
+        .signal_end_of_interrupt();
 
     let frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(pt)).unwrap();
 
@@ -402,23 +450,12 @@ extern "C" fn syscall_interrupt_handler(registers: *mut Registers) {
     }
 
     // Run scheduler if thread is sleeping
-    let mut pt = Cr3::read().0.start_address().as_u64();
-    use_kernel_page_table(|| {
-        scheduler::run(registers);
+    scheduler::run(registers);
 
-        if !has_current_thread() {
-            loop {
-                x86_64::instructions::hlt();
-            }
+    if !has_current_thread() {
+        loop {
+            x86_64::instructions::hlt();
         }
-
-        pt = current_thread().0.process.0.page_table_physical_address;
-    });
-
-    let frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(pt)).unwrap();
-
-    unsafe {
-        Cr3::write(frame, Cr3Flags::empty());
     }
 }
 
@@ -426,18 +463,7 @@ extern "C" fn syscall_interrupt_handler(registers: *mut Registers) {
 extern "C" fn yield_handler(registers: *mut Registers) {
     disable_interrupts();
 
-    let mut pt = Cr3::read().0.start_address().as_u64();
-
-    use_kernel_page_table(|| {
-        scheduler::run(registers);
-        pt = current_thread().0.process.0.page_table_physical_address;
-    });
-
-    let frame = PhysFrame::<Size4KiB>::from_start_address(PhysAddr::new(pt)).unwrap();
-
-    unsafe {
-        Cr3::write(frame, Cr3Flags::empty());
-    }
+    scheduler::run(registers);
 
     enable_interrupts();
 }

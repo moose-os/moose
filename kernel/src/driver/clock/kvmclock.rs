@@ -16,7 +16,7 @@ use x86_64::registers::model_specific::Msr;
 
 use crate::{
     driver::clock::ClockSource,
-    subsystem::memory::{PageFlags, memory_manager},
+    subsystem::memory::{Any, CurrentAddressSpace, Frame, PageFlags, memory_manager},
 };
 
 /// KVM system time structure shared between hypervisor and guest.
@@ -55,8 +55,9 @@ impl ClockSource for KvmClockTimer {
             let clock_frame = mm.allocate_frame().unwrap();
 
             let mut return_value = 0;
-            let _ = mm.map_any_temporary_for_current_address_space(
-                &clock_frame,
+            let _ = mm.map_temporary(
+                CurrentAddressSpace,
+                Any(&Frame::new(clock_frame.address())),
                 PageFlags::empty(),
                 |addr| {
                     // Register physical page with KVM via MSR.
@@ -64,7 +65,7 @@ impl ClockSource for KvmClockTimer {
                     let mut msr = Msr::new(MSR_KVM_SYSTEM_TIME_NEW);
                     msr.write(clock_frame.address().as_u64() | 1);
 
-                    let pv_clock_ptr: *mut KvmPvClockSystemTime = addr.address().as_mut_ptr();
+                    let pv_clock_ptr: *mut KvmPvClockSystemTime = addr.page.address().as_mut_ptr();
 
                     // Read the calibration data using KVM's versioning protocol.
                     // If version is odd, KVM is currently writing to the page.

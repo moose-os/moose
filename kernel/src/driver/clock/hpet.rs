@@ -17,7 +17,9 @@ use acpica_rs::{
 
 use crate::{
     driver::clock::ClockSource,
-    subsystem::memory::{Page, PageFlags, VirtualAddress, memory_manager},
+    subsystem::memory::{
+        AnyIn, CurrentAddressSpace, Frame, PageFlags, PhysicalAddress, memory_manager,
+    },
 };
 
 /// High Precision Event Timer (HPET)
@@ -63,18 +65,23 @@ impl ClockSource for HpetTimer {
         // Fetch the ACPI table to find the address of HPET MMIO registers
         let (_, table_ptr) = self.get_table();
         let table = unsafe { &*(table_ptr as *const ACPI_TABLE_HPET) };
-        let hpet_base = table.Address.Address as *mut u8;
 
         // Map the HPET registers as writable and uncached. We discard the return value, because this space might be AlreadyMapped
         // by Limine.
-        let _ = unsafe {
-            memory_manager()
-                .write()
-                .map_identity_for_current_address_space(
-                    &Page::new(VirtualAddress::new(hpet_base.addr() as u64)),
-                    PageFlags::WRITABLE | PageFlags::DISABLE_CACHING | PageFlags::WRITE_THROUGH,
-                )
-        };
+        let hpet_base: *const u8 = unsafe {
+            memory_manager().write().map(
+                CurrentAddressSpace,
+                AnyIn(
+                    &Frame::new(PhysicalAddress::new(table.Address.Address)),
+                    256..511,
+                ),
+                PageFlags::WRITABLE | PageFlags::DISABLE_CACHING | PageFlags::WRITE_THROUGH,
+            )
+        }
+        .unwrap()
+        .page
+        .address()
+        .as_ptr();
 
         // Read capabilities register to get the counter period (higher 32 bits) in femtoseconds (10^-12)
         let cap_reg =

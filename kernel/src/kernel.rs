@@ -18,10 +18,7 @@ use x86_64::{
 };
 
 use crate::{
-    arch::{
-        irq::IrqAllocator,
-        x86::{InterruptStack, cpu::MAXIMUM_CPU_CORES, gdt::TSS, idt::TIMER_IRQ},
-    },
+    arch::{irq::IrqAllocator, x86::idt::TIMER_IRQ},
     driver::{
         acpi::{Acpi, Device, MadtEntryInner, create_device_list},
         apic::Apic,
