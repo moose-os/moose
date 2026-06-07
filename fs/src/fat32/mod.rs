@@ -6,12 +6,12 @@ pub mod lfn;
 mod directory;
 mod file;
 
-use crate::{fat32::lfn::LongFileName, Attributes, FileSystemError};
+use crate::{Attributes, FileSystemError, fat32::lfn::LongFileName};
 
 use bitfield_struct::bitfield;
 use bitflags::bitflags;
 use bitvec::prelude::*;
-use bytemuck::{cast, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable, cast};
 use chrono::{Datelike, NaiveDateTime, Timelike};
 use core::{
     clone::Clone,
@@ -641,52 +641,19 @@ static IMAGE1_DATA: &[u8] = include_bytes!("../../assets/test1.img");
 #[cfg(test)]
 mod tests {
     use chrono::{NaiveDateTime, Utc};
-    use std::cell::RefCell;
-    use std::fs::File;
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use std::rc::Rc;
-    use std::sync::{Arc, Mutex};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{Arc, Mutex},
+    };
 
     use crate::fat32::fat::Fat;
     use crate::{
         Attributes, Directory, File as FileTrait, FileSystem, FileSystemEntry, FileSystemError,
     };
+    use sha2::{Digest, Sha256};
 
-    use super::{FatDataSource, FatTimeSource, Sector, FAT_SECTOR_SIZE, IMAGE1_DATA};
-
-    // Unused now, but useful for debugging purposes
-    struct FileFatDataSource {
-        file: File,
-    }
-
-    impl FatDataSource for FileFatDataSource {
-        fn read_sectors_to(
-            &mut self,
-            starting_sector: u32,
-            buffer: &mut [Sector],
-        ) -> Result<(), FileSystemError> {
-            let starting_offset = starting_sector * FAT_SECTOR_SIZE as u32;
-
-            self.file
-                .seek(SeekFrom::Start(starting_offset as u64))
-                .unwrap();
-            self.file.read_exact(buffer.as_flattened_mut()).unwrap();
-
-            Ok(())
-        }
-
-        fn write_sector(&mut self, sector: u32, buffer: &[u8]) -> Result<(), FileSystemError> {
-            let starting_offset = sector * FAT_SECTOR_SIZE as u32;
-            assert_eq!(buffer.len(), 512);
-
-            self.file
-                .seek(SeekFrom::Start(starting_offset as u64))
-                .unwrap();
-            self.file.write_all(buffer).unwrap();
-
-            Ok(())
-        }
-    }
+    use super::{FAT_SECTOR_SIZE, FatDataSource, FatTimeSource, IMAGE1_DATA, Sector};
 
     struct InMemoryFatDataSource {
         data: Vec<u8>,
@@ -736,6 +703,71 @@ mod tests {
             0,
         )
     }
+
+    fn user_entry_names<D: Directory>(dir: &D) -> Vec<String> {
+        dir.entries()
+            .filter(|entry| entry.name() != "." && entry.name() != "..")
+            .map(|entry| entry.name().to_string())
+            .collect()
+    }
+
+    fn read_file_at_once(fat: &Rc<RefCell<Fat>>, path: &str) -> Result<Vec<u8>, FileSystemError> {
+        let mut file = fat.open_file(path)?;
+        let mut data = vec![0u8; file.file_size()];
+        file.read(0, &mut data)?;
+        Ok(data)
+    }
+
+    fn read_file_in_chunks(
+        fat: &Rc<RefCell<Fat>>,
+        path: &str,
+        chunk_size: usize,
+    ) -> Result<Vec<u8>, FileSystemError> {
+        assert!(chunk_size > 0);
+
+        let mut file = fat.open_file(path)?;
+        let size = file.file_size();
+        let mut data = vec![0u8; size];
+        let mut offset = 0;
+
+        while offset < size {
+            let end = (offset + chunk_size).min(size);
+            file.read(offset, &mut data[offset..end])?;
+            offset = end;
+        }
+
+        Ok(data)
+    }
+
+    fn sha256_hex(data: &[u8]) -> String {
+        format!("{:x}", Sha256::digest(data))
+    }
+
+    /// Reads the whole file, checks SHA-256, then re-reads it in several chunk sizes
+    /// (including cluster boundaries) and requires byte-identical results.
+    fn assert_full_file_integrity(
+        fat: &Rc<RefCell<Fat>>,
+        path: &str,
+        expected_size: usize,
+        expected_sha256: &str,
+        chunk_sizes: &[usize],
+    ) -> Result<(), FileSystemError> {
+        let whole = read_file_at_once(fat, path)?;
+        assert_eq!(whole.len(), expected_size);
+        assert_eq!(sha256_hex(&whole), expected_sha256);
+
+        for &chunk_size in chunk_sizes {
+            let chunked = read_file_in_chunks(fat, path, chunk_size)?;
+            assert_eq!(
+                chunked, whole,
+                "full-file read != chunked read (chunk_size={chunk_size}) for {path}"
+            );
+        }
+
+        Ok(())
+    }
+
+    const CLUSTER_STRESS_CHUNK_SIZES: &[usize] = &[512, 4095, 4096, 4097, 8192];
 
     #[test]
     fn test_file_listing_in_root_directory() {
@@ -1081,5 +1113,340 @@ mod tests {
         assert!(file.read(0x168A + 2, &mut buffer[..]).is_err());
 
         Ok(())
+    }
+
+    #[test]
+    fn test_books_polish_directory_listing() {
+        let fat = setup_fat();
+        let dir = fat.open_directory("books/polish").unwrap();
+        let mut names = user_entry_names(&dir);
+        names.sort();
+
+        assert_eq!(names, vec!["pan-tadeusz.txt", "wesele.txt"]);
+    }
+
+    #[test]
+    fn test_books_english_file_sizes() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+
+        assert_eq!(
+            fat.open_file("books/english/macbeth.txt")?.file_size(),
+            119_097
+        );
+        assert_eq!(
+            fat.open_file("books/english/romeojuliet.txt")?.file_size(),
+            158_052
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_wesele_header() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file = fat.open_file("books/polish/wesele.txt")?;
+
+        assert_eq!(file.file_size(), 171_474);
+
+        let mut buffer = [0u8; 64];
+        file.read(0, &mut buffer)?;
+        let text = String::from_utf8_lossy(&buffer);
+        assert!(text.contains("Wesele"));
+        assert!(text.contains("Dramat w trzech aktach"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_romeo_juliet_header() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file = fat.open_file("books/english/romeojuliet.txt")?;
+
+        let mut buffer = [0u8; 80];
+        file.read(0, &mut buffer)?;
+        let text = String::from_utf8_lossy(&buffer);
+        assert!(text.contains("ROMEO AND JULIET"));
+        assert!(text.contains("Shakespeare"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_fruits_directory_listing() {
+        let fat = setup_fat();
+        let dir = fat.open_directory("fruits").unwrap();
+        let mut names = user_entry_names(&dir);
+        names.sort();
+
+        assert_eq!(names.len(), 16);
+        assert!(names.iter().any(|name| name.starts_with("MANGO")));
+        assert!(names.contains(&"STRAWBERRY.TXT".to_string()));
+        assert!(names.contains(&"random things".to_string()));
+    }
+
+    #[test]
+    fn test_read_small_fruit_file_contents() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let dir = fat.open_directory("fruits")?;
+        let names = user_entry_names(&dir);
+
+        let mango_name = names.iter().find(|n| n.starts_with("MANGO")).unwrap();
+        let pear_name = names.iter().find(|n| n.starts_with("PEAR")).unwrap();
+        let banana_name = names.iter().find(|n| n.starts_with("BANANA")).unwrap();
+
+        let mut mango = fat.open_file(&format!("fruits/{mango_name}"))?;
+        let mut pear = fat.open_file(&format!("fruits/{pear_name}"))?;
+        let mut banana = fat.open_file(&format!("fruits/{banana_name}"))?;
+
+        let mut mango_buf = [0u8; 5];
+        let mut pear_buf = [0u8; 4];
+        let mut banana_buf = [0u8; 6];
+        mango.read(0, &mut mango_buf)?;
+        pear.read(0, &mut pear_buf)?;
+        banana.read(0, &mut banana_buf)?;
+
+        assert_eq!(&mango_buf, b"MANGO");
+        assert_eq!(&pear_buf, b"PEAR");
+        assert_eq!(&banana_buf, b"BANANA");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_fat32_txt() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file =
+            fat.open_file("filesystems/File Allocation Table/File Allocation Table 32/fat32.txt")?;
+
+        assert_eq!(file.file_size(), 5);
+
+        let mut buffer = [0u8; 5];
+        file.read(0, &mut buffer)?;
+        assert_eq!(&buffer, b"fat32");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_open_wrong_entry_type() {
+        let fat = setup_fat();
+
+        assert!(matches!(
+            fat.open_file("books"),
+            Err(FileSystemError::NotAFile)
+        ));
+        assert!(matches!(
+            fat.open_directory("lorem_ipsum.txt"),
+            Err(FileSystemError::NotADirectory)
+        ));
+    }
+
+    #[test]
+    fn test_open_missing_path() {
+        let fat = setup_fat();
+
+        assert!(matches!(
+            fat.open_file("no/such/file.txt"),
+            Err(FileSystemError::NotFound)
+        ));
+        assert!(matches!(
+            fat.open_directory("filesystems/ghost directory"),
+            Err(FileSystemError::NotFound)
+        ));
+    }
+
+    #[test]
+    fn test_read_glossary_large_file() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file = fat.open_file("fruits/random things/random2/Methamphetamine.txt")?;
+
+        assert_eq!(file.file_size(), 45_613);
+
+        let mut buffer = [0u8; 96];
+        file.read(0, &mut buffer)?;
+        assert!(buffer.iter().any(|byte| *byte != 0));
+
+        file.read(20_000, &mut buffer)?;
+        assert!(buffer.iter().any(|byte| *byte != 0));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_script_py() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file = fat.open_file("fruits/random things/script.py")?;
+
+        assert_eq!(file.file_size(), 1_215);
+
+        let mut buffer = [0u8; 32];
+        file.read(0, &mut buffer)?;
+        assert_eq!(&buffer[..8], b"words = ");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_drive_letter_assignment() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file = fat.open_file("fruits/random things/random2/Drive letter assignment.txt")?;
+
+        assert_eq!(file.file_size(), 18_545);
+
+        let mut buffer = [0u8; 80];
+        file.read(0, &mut buffer)?;
+        let text = String::from_utf8_lossy(&buffer);
+        assert!(text.starts_with("In computer data storage, drive letter assignment"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_filesystems_nested_directories() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+
+        let fat_dir = fat.open_directory("filesystems/File Allocation Table")?;
+        let mut names = user_entry_names(&fat_dir);
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "File Allocation Table 12",
+                "File Allocation Table 16",
+                "File Allocation Table 32",
+            ]
+        );
+
+        assert_eq!(
+            user_entry_names(&fat.open_directory("filesystems/New Technology File System")?),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            user_entry_names(&fat.open_directory("filesystems/Resilient File System")?),
+            Vec::<String>::new()
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_write_append_extends_file_size() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let grape_name = user_entry_names(&fat.open_directory("fruits")?)
+            .into_iter()
+            .find(|name| name.starts_with("GRAPE"))
+            .unwrap();
+        let mut file = fat.open_file(&format!("fruits/{grape_name}"))?;
+
+        assert_eq!(file.file_size(), 5);
+        file.write(5, b"!")?;
+
+        let mut buffer = [0u8; 6];
+        file.read(0, &mut buffer)?;
+        assert_eq!(&buffer, b"GRAPE!");
+        assert_eq!(file.file_size(), 6);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_pan_tadeusz_file_size_and_read() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let mut file = fat.open_file("books/polish/pan-tadeusz.txt")?;
+
+        assert_eq!(file.file_size(), 493_758);
+
+        let mut buffer = [0u8; 32];
+        file.read(0, &mut buffer)?;
+        let text = String::from_utf8_lossy(&buffer);
+        assert!(text.contains("Adam Mickiewicz"));
+        assert!(text.contains("Pan Tadeusz"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_random2_directory_listing() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let dir = fat.open_directory("fruits/random things/random2")?;
+        let mut names = user_entry_names(&dir);
+        names.sort();
+
+        assert_eq!(names.len(), 6);
+        assert!(names.contains(&"AxelF.txt".to_string()));
+        assert!(names.contains(&"Methamphetamine.txt".to_string()));
+        assert!(names.contains(&"Till Lindemann.txt".to_string()));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_lorem_ipsum_file_size() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        let file = fat.open_file("lorem_ipsum.txt")?;
+
+        assert_eq!(file.file_size(), 3_574);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_read_lorem_ipsum_full_integrity() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        assert_full_file_integrity(
+            &fat,
+            "lorem_ipsum.txt",
+            3_574,
+            "008a23e4428bfa0e33058eee8766230ff3912afc49e865e43d2d7cffa14f50f2",
+            &[1, 512, 4096, 4097],
+        )
+    }
+
+    #[test]
+    fn test_read_macbeth_full_integrity() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        assert_full_file_integrity(
+            &fat,
+            "books/english/macbeth.txt",
+            119_097,
+            "1781445953af1c93864ae20a8c16416d8d04e91a5010b981a8eb76a14f1deb92",
+            CLUSTER_STRESS_CHUNK_SIZES,
+        )
+    }
+
+    #[test]
+    fn test_read_pan_tadeusz_full_integrity() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        assert_full_file_integrity(
+            &fat,
+            "books/polish/pan-tadeusz.txt",
+            493_758,
+            "f9038b0f9cb70efce5090921c3a73356527066eadeee1050c021d65720950574",
+            CLUSTER_STRESS_CHUNK_SIZES,
+        )
+    }
+
+    #[test]
+    fn test_read_methamphetamine_full_integrity() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        assert_full_file_integrity(
+            &fat,
+            "fruits/random things/random2/Methamphetamine.txt",
+            45_613,
+            "daa5e710cf69cfac62069dccc24bc8d48da43fe430eba91f5d4a93e9ac012aa9",
+            CLUSTER_STRESS_CHUNK_SIZES,
+        )
+    }
+
+    #[test]
+    fn test_read_till_lindemann_full_integrity() -> Result<(), FileSystemError> {
+        let fat = setup_fat();
+        assert_full_file_integrity(
+            &fat,
+            "fruits/random things/random2/Till Lindemann.txt",
+            14_114,
+            "bcf0003939dbcc43bf7d9ac23717c57680860bcd9558e70cca8c1ee348c2e0bc",
+            CLUSTER_STRESS_CHUNK_SIZES,
+        )
     }
 }

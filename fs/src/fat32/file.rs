@@ -2,10 +2,10 @@ use chrono::NaiveDateTime;
 use libm::ceil;
 use std::{cell::RefCell, cmp::min, rc::Rc};
 
-use super::fat::{Fat, FAT_FREE_SECTOR};
+use super::fat::{ContiguousClusterRuns, FAT_END_OF_FILE_MARK, FAT_FREE_SECTOR, Fat};
 use crate::{
-    fat32::{directory::FatDirectory, FatFileAttributes, FatFileEntry},
     Attributes, File, FileSystemError,
+    fat32::{FatFileAttributes, FatFileEntry, directory::FatDirectory},
 };
 
 pub struct FatFile {
@@ -37,60 +37,67 @@ impl File for FatFile {
         let mut temp_buffer: Vec<u8> = vec![0; cluster_size];
         let temp_slice = temp_buffer.as_mut_slice();
 
-        for cluster in self
-            .filesystem
-            .borrow()
-            .get_clusters_for_file(self.starting_cluster)
-            .skip(clusters_to_skip)
-        {
-            if to_read == 0 {
-                break;
-            }
+        let fat = self.filesystem.borrow();
+        let mut runs = ContiguousClusterRuns::new(
+            fat.get_clusters_for_file(self.starting_cluster)
+                .skip(clusters_to_skip),
+        );
+        let mut current_run: Option<(u32, u32)> = None;
 
-            let copy_size = min(to_read, cluster_size - offset_within_cluster);
+        while to_read > 0 {
+            if offset_within_cluster != 0 || to_read < cluster_size {
+                let cluster = take_next_cluster(&mut current_run, &mut runs)
+                    .ok_or(FileSystemError::ReadOutOfBounds)?;
 
-            if offset_within_cluster == 0 {
-                if copy_size < cluster_size {
-                    // Copy whole cluster to the temporary buffer
-                    self.filesystem
-                        .borrow()
-                        .read_cluster_to(cluster, temp_slice)?;
+                fat.read_cluster_to(cluster, temp_slice)?;
 
-                    // Copy from temporary_buffer[offset:] to the user supplied buffer
-                    buffer[reading_offset..(reading_offset + copy_size)]
-                        .copy_from_slice(&temp_slice[0..copy_size]);
-
-                    to_read -= copy_size;
-                    reading_offset += copy_size;
-
-                    // Start next read from first byte of next cluster
-                    offset_within_cluster = 0;
-                } else {
-                    self.filesystem.borrow().read_cluster_to(
-                        cluster,
-                        &mut buffer[reading_offset..(reading_offset + cluster_size)],
-                    )?;
-
-                    to_read -= cluster_size;
-                    reading_offset += cluster_size;
-                }
-            } else {
-                // Copy whole cluster to the temporary buffer
-                self.filesystem
-                    .borrow()
-                    .read_cluster_to(cluster, temp_slice)?;
-
-                // Copy from temporary_buffer[offset:] to the user supplied buffer
+                let copy_size = min(to_read, cluster_size - offset_within_cluster);
                 buffer[reading_offset..(reading_offset + copy_size)].copy_from_slice(
                     &temp_slice[offset_within_cluster..(offset_within_cluster + copy_size)],
                 );
 
                 to_read -= copy_size;
                 reading_offset += copy_size;
-
-                // Start next read from first byte of next cluster
                 offset_within_cluster = 0;
+                continue;
             }
+
+            if current_run.is_none() {
+                current_run = runs.next();
+            }
+
+            let Some((first, count)) = current_run else {
+                return Err(FileSystemError::ReadOutOfBounds);
+            };
+
+            let batch_clusters = min(count, (to_read / cluster_size) as u32);
+            let batch_bytes = batch_clusters as usize * cluster_size;
+
+            if batch_clusters == 1 {
+                fat.read_cluster_to(
+                    first,
+                    &mut buffer[reading_offset..(reading_offset + cluster_size)],
+                )?;
+                current_run = if count > 1 {
+                    Some((first + 1, count - 1))
+                } else {
+                    None
+                };
+            } else {
+                fat.read_contiguous_clusters_to(
+                    first,
+                    batch_clusters,
+                    &mut buffer[reading_offset..(reading_offset + batch_bytes)],
+                )?;
+                current_run = if batch_clusters == count {
+                    None
+                } else {
+                    Some((first + batch_clusters, count - batch_clusters))
+                };
+            }
+
+            to_read -= batch_bytes;
+            reading_offset += batch_bytes;
         }
 
         assert_eq!(to_read, 0);
@@ -109,17 +116,20 @@ impl File for FatFile {
 
         let mut to_write = buffer.len();
         let mut writing_offset = 0;
-        let clusters = self
+        let last_cluster = self
             .filesystem
             .borrow()
-            .get_clusters_for_file(self.starting_cluster)
-            .skip(clusters_to_skip);
-        let last_cluster = clusters.clone().last().unwrap();
+            .last_cluster_in_chain(self.starting_cluster)?;
 
         let mut temp_buffer: Vec<u8> = vec![0; cluster_size];
         let temp_slice = temp_buffer.as_mut_slice();
 
-        for cluster in clusters {
+        for cluster in self
+            .filesystem
+            .borrow()
+            .get_clusters_for_file(self.starting_cluster)
+            .skip(clusters_to_skip)
+        {
             if to_write == 0 {
                 break;
             }
@@ -210,8 +220,9 @@ impl File for FatFile {
             .collect();
 
         // Link current last cluster to the newly allocated chain of clusters
-        self.filesystem.borrow_mut().file_allocation_table[last_cluster as usize] =
-            allocated_clusters.first().unwrap().0 as u32;
+        self.filesystem
+            .borrow()
+            .write_fat_entry(last_cluster, allocated_clusters.first().unwrap().0 as u32)?;
 
         let mut temp_buffer: Vec<u8> = vec![0; cluster_size];
         let temp_slice = temp_buffer.as_mut_slice();
@@ -240,7 +251,7 @@ impl File for FatFile {
         let mut fat = self.filesystem.borrow_mut();
 
         fat.remove_file_entry(&self.file_entry, self.file_entry_cluster)?;
-        fat.mark_clusters_as_free(self.starting_cluster);
+        fat.mark_clusters_as_free(self.starting_cluster)?;
 
         Ok(())
     }
@@ -297,29 +308,19 @@ impl File for FatFile {
         // if new file size is somewhere in previous clusters, then find last cluster, remove
         // subsequent clusters from FAT table and update file_size in file_entry
 
-        // Get list of clusters associated with file
-        let mut file_clusters = fat.get_clusters_for_file(self.starting_cluster);
+        let last_kept_cluster = fat
+            .get_clusters_for_file(self.starting_cluster)
+            .nth(new_last_cluster)
+            .ok_or(FileSystemError::InvalidArgument)?;
 
-        // Get index of last valid cluster within new file size
-        let new_last_cluster_index = file_clusters
-            .clone()
-            .enumerate()
-            .map(|(index, _cluster)| index)
-            .find(|&index| index == new_last_cluster)
-            .unwrap();
+        for cluster in fat
+            .get_clusters_for_file(self.starting_cluster)
+            .skip(new_last_cluster + 1)
+        {
+            fat.write_fat_entry(cluster, FAT_FREE_SECTOR)?;
+        }
 
-        // Skip `new_last_cluster_index` used entries in iterator
-        file_clusters
-            .advance_by(new_last_cluster_index + 1)
-            .unwrap();
-
-        // Mark remaining clusters as free
-        file_clusters.for_each(|cluster| {
-            fat.file_allocation_table[cluster as usize] = FAT_FREE_SECTOR;
-        });
-
-        // Mark last cluster as end of file
-        fat.file_allocation_table[new_last_cluster_index] = 0xFFFF_FFFF;
+        fat.write_fat_entry(last_kept_cluster, FAT_END_OF_FILE_MARK)?;
 
         // Write changes to the disk
         fat.serialize_file_entry(
@@ -394,4 +395,24 @@ impl File for FatFile {
     fn name(&self) -> &str {
         &self.file_entry.name
     }
+}
+
+fn take_next_cluster<I: Iterator<Item = u32>>(
+    current_run: &mut Option<(u32, u32)>,
+    runs: &mut ContiguousClusterRuns<I>,
+) -> Option<u32> {
+    if current_run.is_none() {
+        *current_run = runs.next();
+    }
+
+    let (first, count) = current_run.as_mut()?;
+    let cluster = *first;
+    if *count == 1 {
+        *current_run = None;
+    } else {
+        *first += 1;
+        *count -= 1;
+    }
+
+    Some(cluster)
 }

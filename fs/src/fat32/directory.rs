@@ -1,7 +1,7 @@
 use chrono::NaiveDateTime;
 use std::{cell::RefCell, rc::Rc};
 
-use super::{fat::Fat, file::FatFile, FatFileAttributes, FatFileEntry, RawFatFileEntry};
+use super::{FatFileAttributes, FatFileEntry, RawFatFileEntry, fat::Fat, file::FatFile};
 use crate::{Attributes, Directory, FileSystemEntry, FileSystemError};
 
 /// Implementation of filesystems' Directory
@@ -63,28 +63,29 @@ impl Directory for FatDirectory {
         let filesystem = self.filesystem.borrow();
 
         for cluster in filesystem.get_clusters_for_file(self.content_cluster) {
-            filesystem
-                .get_file_listing_from_cluster(cluster)
-                .unwrap()
-                .into_iter()
-                .map(|entry| {
-                    if entry.attr().is_directory() {
-                        FileSystemEntry::Directory {
-                            name: entry.name().to_string(),
-                            creation_date_time: entry.creation_date_time,
-                            modification_date_time: entry.last_write_date_time,
-                            attributes: Attributes::from(entry.attr),
+            directory_entries.extend(
+                filesystem
+                    .get_file_listing_from_cluster(cluster)
+                    .unwrap()
+                    .into_iter()
+                    .map(|entry| {
+                        if entry.attr().is_directory() {
+                            FileSystemEntry::Directory {
+                                name: entry.name().to_string(),
+                                creation_date_time: entry.creation_date_time,
+                                modification_date_time: entry.last_write_date_time,
+                                attributes: Attributes::from(entry.attr),
+                            }
+                        } else {
+                            FileSystemEntry::File {
+                                name: entry.name().to_string(),
+                                creation_date_time: entry.creation_date_time,
+                                modification_date_time: entry.last_write_date_time,
+                                attributes: Attributes::from(entry.attr),
+                            }
                         }
-                    } else {
-                        FileSystemEntry::File {
-                            name: entry.name().to_string(),
-                            creation_date_time: entry.creation_date_time,
-                            modification_date_time: entry.last_write_date_time,
-                            attributes: Attributes::from(entry.attr),
-                        }
-                    }
-                })
-                .collect_into(&mut directory_entries);
+                    }),
+            );
         }
 
         directory_entries.into_iter()
@@ -125,7 +126,7 @@ impl Directory for FatDirectory {
         let mut fat = self.filesystem.borrow_mut();
 
         fat.remove_file_entry(&self.file_entry, self.file_entry_cluster)?;
-        fat.mark_clusters_as_free(self.content_cluster);
+        fat.mark_clusters_as_free(self.content_cluster)?;
 
         Ok(())
     }

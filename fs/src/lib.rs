@@ -1,14 +1,6 @@
 //! Filesystem crate for Moose operating system
 //!
 //! Contains definitions of FileSystem, File and Directory traits and mutual errors and attributes
-#![feature(iter_advance_by)]
-#![feature(iter_array_chunks)]
-#![feature(iter_collect_into)]
-#![feature(iter_intersperse)]
-#![feature(iterator_try_collect)]
-#![feature(slice_pattern)]
-
-extern crate core;
 
 pub mod fat32;
 

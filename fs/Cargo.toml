@@ -1,7 +1,14 @@
 [package]
 name = "fs"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
+rust-version = "1.85"
+
+[lints.rust]
+dead_code = "allow"
+
+[lints.clippy]
+manual_div_ceil = "allow"
 
 [dependencies]
 bitflags = "2.5.0"
@@ -19,3 +26,6 @@ bitvec = { version = "1.0.1", default-features = false, features = ["alloc", "at
 
 [features]
 no_std = ["spin"]
+
+[dev-dependencies]
+sha2 = "0.10"
