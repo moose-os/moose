@@ -1,12 +1,13 @@
 use alloc::boxed::Box;
 use core::cell::OnceCell;
 
+use spin::rwlock::RwLock;
 use x86_64::{
     VirtAddr,
     registers::segmentation::{GS, Segment64},
 };
 
-use crate::driver::apic::LocalApic;
+use crate::{driver::apic::LocalApic, subsystem::clock::timer::HrTimer};
 
 pub(crate) const MAXIMUM_CPU_CORES: usize = 4;
 
@@ -14,6 +15,7 @@ pub struct ProcessorControlBlock {
     pub apic_processor_id: u16,
     pub is_bsp: bool,
     pub local_apic: OnceCell<LocalApic>,
+    pub hr_timers: RwLock<HrTimer>,
 }
 
 impl ProcessorControlBlock {
@@ -22,6 +24,7 @@ impl ProcessorControlBlock {
             apic_processor_id,
             is_bsp: false,
             local_apic: OnceCell::new(),
+            hr_timers: RwLock::new(HrTimer::new()),
         }));
 
         unsafe { GS::write_base(VirtAddr::new(ptr as *mut _ as u64)) };

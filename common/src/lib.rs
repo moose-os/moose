@@ -2,6 +2,12 @@
 
 use core::cmp::min;
 
+mod rb_tree;
+mod statistics;
+
+pub use rb_tree::*;
+pub use statistics::*;
+
 /// The `Read` trait provides methods for reading data from a source.
 ///
 /// This trait is intended to be implemented by types that represent

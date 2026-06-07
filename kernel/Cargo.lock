@@ -5,7 +5,7 @@ version = 4
 [[package]]
 name = "acpica-rs"
 version = "0.1.0"
-source = "git+https://github.com/moose-os/acpica-rs#053017b89bc1b8d9afe84b8841412d9d722923ba"
+source = "git+https://github.com/moose-os/acpica-rs#b010da6b1150f33c46f7b8df057442d22c0602b5"
 dependencies = [
  "acpica-sys",
  "spin",
@@ -14,7 +14,7 @@ dependencies = [
 [[package]]
 name = "acpica-sys"
 version = "0.1.0"
-source = "git+https://github.com/moose-os/acpica-rs#053017b89bc1b8d9afe84b8841412d9d722923ba"
+source = "git+https://github.com/moose-os/acpica-rs#b010da6b1150f33c46f7b8df057442d22c0602b5"
 dependencies = [
  "bindgen",
 ]
@@ -112,6 +112,9 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
+dependencies = [
+ "generational-arena",
+]
 
 [[package]]
 name = "const_fn"
@@ -203,6 +206,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6d5a32815ae3f33302d95fdcb2ce17862f8c65363dcfd29360480ba1001fc9c"
 
 [[package]]
+name = "generational-arena"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "877e94aff08e743b651baaea359664321055749b398adff8740a7399af7796e7"
+dependencies = [
+ "cfg-if",
+]
+
+[[package]]
 name = "glob"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -249,6 +261,7 @@ dependencies = [
  "bitflags",
  "common",
  "deku",
+ "generational-arena",
  "goblin",
  "libm",
  "limine",
@@ -315,9 +328,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.31"
+version = "0.4.32"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "113b30b4cd05f7c06868fdb2854f66a7b9fece9a48425351cd532e810d74024f"
+checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
 
 [[package]]
 name = "memchr"

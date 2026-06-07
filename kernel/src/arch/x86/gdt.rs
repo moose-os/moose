@@ -84,6 +84,19 @@ pub unsafe fn setup_tss(processor_index: u16) {
         interrupt_stack as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
     tss[processor_index as usize].rsp1 = 0;
     tss[processor_index as usize].rsp2 = 0;
+
+    let timer_interrupt_stack = unsafe { InterruptStack::allocate() };
+    let yield_interrupt_stack = unsafe { InterruptStack::allocate() };
+    let syscall_interrupt_stack = unsafe { InterruptStack::allocate() };
+
+    tss[processor_index as usize].ist1 =
+        timer_interrupt_stack.addr() as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
+
+    tss[processor_index as usize].ist2 =
+        yield_interrupt_stack.addr() as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
+
+    tss[processor_index as usize].ist3 =
+        syscall_interrupt_stack.addr() as u64 + mem::size_of::<InterruptStack>() as u64 - 16;
 }
 
 #[inline(always)]

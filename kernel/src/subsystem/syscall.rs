@@ -1,5 +1,7 @@
 use core::{ffi::CStr, ptr};
 
+use crate::subsystem::{clock::time::Duration, scheduler::current_thread};
+
 pub extern "C" fn write_syscall(descriptor: u64, buffer: *const u8, count: u64) {
     info!("sys_write ({descriptor}, {buffer:p}, {count})");
 
@@ -17,4 +19,7 @@ pub extern "C" fn write_syscall(descriptor: u64, buffer: *const u8, count: u64) 
             .unwrap()
             .to_string_lossy()
     );
+
+    // @TODO: Remove it later, only for testing purposes
+    current_thread().sleep(Duration::from_millis(500));
 }

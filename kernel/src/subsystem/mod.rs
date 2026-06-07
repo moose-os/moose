@@ -1,5 +1,6 @@
 pub mod allocator;
 pub mod boot;
+pub mod clock;
 pub mod linker;
 pub mod logger;
 pub mod memory;
