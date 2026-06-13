@@ -38,6 +38,10 @@ acpica-rs = { git = "https://github.com/moose-os/acpica-rs" }
 
 generational-arena = { version = "0.2", default-features = false }
 
+hashbrown = "*"
+bytemuck = "*"
+zerocopy = { version = "0.8", features = ["derive"] }
+
 [profile.dev]
 opt-level = 1
 panic = "abort"

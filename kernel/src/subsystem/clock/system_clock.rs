@@ -273,13 +273,13 @@ pub struct SystemClock {
     lapic_frequency: u64,
 
     /// Nanosecond offset added to the monotonic clock to obtain wall-clock time.
-    wall_clock_base_ns: AtomicU64,
+    pub wall_clock_base_ns: AtomicU64,
 
     /// Bit-shift applied after the TSC multiply to yield nanoseconds.
-    ns_per_tsc_shift: u32,
+    pub ns_per_tsc_shift: u32,
 
     /// Fixed-point multiplier for converting TSC ticks to nanoseconds.
-    ns_per_tsc_mult: u64,
+    pub ns_per_tsc_mult: u64,
 }
 
 impl SystemClock {

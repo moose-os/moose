@@ -1,5 +1,9 @@
 use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
-use core::{arch::asm, mem, sync::atomic::Ordering};
+use core::{
+    arch::asm,
+    mem,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use spin::Mutex;
 use x86_64::{
@@ -131,6 +135,84 @@ pub extern "C" fn yield_to_scheduler() {
             "int {irq}",
             irq = const YIELD_IRQ,
         )
+    }
+}
+
+/// A single-use synchronization gate that can be opened exactly once.
+///
+/// `OneshotGate` solves the classic "signal before wait" race condition that
+/// arises when an interrupt may fire before the waiting thread has a chance
+/// to sleep. It is safe to call [`open`] from an interrupt handler and
+/// [`wait`] from a regular thread in any order.
+///
+/// # Guarantees
+///
+/// - If [`open`] is called **before** [`wait`], `wait` returns immediately
+///   without blocking.
+/// - If [`open`] is called **after** [`wait`] has started blocking, `wait`
+///   wakes up and returns promptly.
+/// - Once opened, the gate stays open forever — all subsequent calls to
+///   [`wait`] return immediately.
+pub struct OneshotGate {
+    /// Set to `true` by [`open`] before notifying the event.
+    /// Read with `Acquire` ordering to synchronize with the `Release` store.
+    flag: AtomicBool,
+
+    /// Event used by the thread to sleep on.
+    event: Event,
+}
+
+impl OneshotGate {
+    /// Creates a new, closed gate.
+    pub fn new() -> Self {
+        Self {
+            flag: AtomicBool::new(false),
+            event: Event::new(),
+        }
+    }
+
+    /// Opens the gate and wakes all threads currently blocked in [`wait`].
+    ///
+    /// The flag is stored with [`Release`] ordering **before** the
+    /// notification is sent. This ensures that a waiter which is racing
+    /// between its flag check and its call to `event.wait()` will either:
+    ///
+    /// - See `true` on its next flag check and return without sleeping, or
+    /// - Be woken immediately by the notification.
+    #[inline]
+    pub fn open(&self) {
+        self.flag.store(true, Ordering::Release);
+        self.event.notify();
+    }
+
+    /// Blocks the current thread until the gate is opened.
+    ///
+    /// Returns immediately if the gate is already open (fast path — no
+    /// kernel entry or scheduler interaction).
+    pub fn wait(&self) {
+        // Fast path: avoid kernel entry entirely if already open.
+        if self.flag.load(Ordering::Acquire) {
+            return;
+        }
+
+        while !self.flag.load(Ordering::Acquire) {
+            self.event.wait_on(&current_thread());
+
+            yield_to_scheduler();
+        }
+    }
+
+    /// Returns `true` if the gate has been opened.
+    ///
+    /// Uses [`Acquire`] ordering so that any writes made before [`open`]
+    /// are visible to the caller after this returns `true`.
+    pub fn is_open(&self) -> bool {
+        self.flag.load(Ordering::Acquire)
+    }
+
+    /// Resets the gate to its initial closed state.
+    pub unsafe fn reset(&self) {
+        self.flag.store(false, Ordering::Release);
     }
 }
 
