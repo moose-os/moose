@@ -22,6 +22,7 @@ use crate::{
     driver::{
         acpi::{Acpi, Device, MadtEntryInner, create_device_list},
         apic::Apic,
+        hv::hyperv::{HyperV, synthetic_device::integration::socket::VmBusSocket},
         pci::{Pci, PciDevice},
         pic::ProgrammableInterruptController,
         serial::{Serial, SerialPort},
@@ -45,6 +46,23 @@ use crate::{
     },
 };
 
+#[allow(clippy::large_enum_variant)]
+pub enum VirtualizedDevicesManager {
+    VMBus(HyperV),
+    Virtio, // soon
+}
+
+impl VirtualizedDevicesManager {
+    /// # Safety
+    /// Caller must guarantee that the enum is actually the VMBus variant.
+    pub unsafe fn unwrap_vmbus(&self) -> &HyperV {
+        match self {
+            Self::VMBus(vmbus) => vmbus,
+            _ => unreachable!(),
+        }
+    }
+}
+
 static KERNEL: Kernel = Kernel::new();
 
 pub struct Kernel {
@@ -60,6 +78,7 @@ pub struct Kernel {
 
     pub irq_allocator: Mutex<IrqAllocator>,
 
+    pub virtualized_devices_manager: Once<VirtualizedDevicesManager>,
     pub platform_devices: PlatformDevices,
     pub devices: Mutex<Vec<Arc<Mutex<Device>>>>,
     pub pci_devices: Mutex<Vec<PciDevice>>,
@@ -95,11 +114,14 @@ impl Kernel {
 
             irq_allocator: Mutex::new(IrqAllocator::new()),
 
+            virtualized_devices_manager: Once::new(),
             platform_devices: PlatformDevices {
-                serial: Once::new(),
                 pic: Mutex::new(ProgrammableInterruptController::new()),
                 acpi: Once::new(),
                 apic: Once::new(),
+
+                hyperv_socket: Once::new(),
+                serial: Once::new(),
             },
             devices: Mutex::new(Vec::new()),
             pci_devices: Mutex::new(Vec::new()),
@@ -169,6 +191,10 @@ impl Kernel {
         self.platform_devices
             .serial
             .call_once(|| Mutex::new(SerialPort::COM1.open().unwrap()));
+    }
+
+    pub(crate) fn initialize_hv_socket(&self, socket: Arc<VmBusSocket>) {
+        self.platform_devices.hyperv_socket.call_once(|| socket);
     }
 
     pub(crate) fn initialize_terminal(&'static self) {
@@ -251,7 +277,7 @@ impl Kernel {
 
         // Spawn separate idle thread for every CPU
         for _ in 0..cpu_core_count {
-            let _ = self.spawn_kernel_thread(idle_thread, LOWEST_THREAD_PRIORITY);
+            let _ = self.spawn_kernel_thread(idle_thread, 0, LOWEST_THREAD_PRIORITY);
         }
     }
 
@@ -358,7 +384,8 @@ impl Kernel {
 
     pub fn spawn_kernel_thread(
         &self,
-        entry_point: extern "C" fn() -> !,
+        entry_point: extern "C" fn(arg: u64) -> !,
+        arg: u64,
         priority: usize,
     ) -> Result<Thread, ()> {
         if priority > HIGHEST_THREAD_PRIORITY {
@@ -378,6 +405,7 @@ impl Kernel {
             entry: entry_point as *const c_void,
             registers: Mutex::new(Registers {
                 rip: entry_point as usize as u64,
+                rdi: arg,
                 rsp: stack as u64 + mem::size_of::<ThreadStack>() as u64 - 16,
                 cs: (5 << 3),
                 ss: (6 << 3),
@@ -454,6 +482,11 @@ impl Kernel {
     }
 
     #[inline(always)]
+    pub fn virtualized_devices(&self) -> &Once<VirtualizedDevicesManager> {
+        &self.virtualized_devices_manager
+    }
+
+    #[inline(always)]
     pub fn acpi(&self) -> &Acpi {
         self.platform_devices
             .acpi
@@ -495,10 +528,12 @@ impl Kernel {
 }
 
 pub struct PlatformDevices {
-    pub(crate) serial: Once<Mutex<Serial>>,
     pub(crate) pic: Mutex<ProgrammableInterruptController>,
     pub(crate) acpi: Once<Acpi>,
     pub(crate) apic: Once<RwLock<Apic>>,
+
+    pub(crate) hyperv_socket: Once<Arc<VmBusSocket>>,
+    pub(crate) serial: Once<Mutex<Serial>>,
 }
 
 #[inline(always)]
@@ -506,7 +541,7 @@ pub fn kernel_ref() -> &'static Kernel {
     &KERNEL
 }
 
-extern "C" fn idle_thread() -> ! {
+extern "C" fn idle_thread(_: u64) -> ! {
     loop {
         hlt();
     }

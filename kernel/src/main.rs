@@ -18,7 +18,7 @@ mod kernel;
 mod panic;
 mod subsystem;
 
-use raw_cpuid::CpuId;
+use raw_cpuid::{CpuId, Hypervisor};
 
 use crate::{
     arch::x86::{
@@ -26,8 +26,8 @@ use crate::{
         cpu::ProcessorControlBlock,
         gdt::{load_tss, setup_tss},
     },
-    driver::{acpi::initialize_acpica, apic::LocalApic},
-    kernel::kernel_ref,
+    driver::{acpi::initialize_acpica, apic::LocalApic, hv::hyperv::HyperV},
+    kernel::{VirtualizedDevicesManager, kernel_ref},
     subsystem::{logger::init_logger, process::DEFAULT_THREAD_PRIORITY, scheduler::Scheduler},
 };
 
@@ -113,6 +113,20 @@ unsafe extern "C" fn _start() -> ! {
 
     info!("Spawning test processes...");
     spawn_test_processes();
+
+    info!("Checking support for hypervisor...");
+    if CpuId::new().get_hypervisor_info().unwrap().identify() == Hypervisor::HyperV {
+        info!("Found HyperV. Spawning worker thread...");
+        let t = kernel
+            .virtualized_devices_manager
+            .call_once(|| VirtualizedDevicesManager::VMBus(HyperV::new()));
+
+        let VirtualizedDevicesManager::VMBus(hv) = t else {
+            panic!("")
+        };
+
+        hv.spawn_worker_thread();
+    }
 
     enable_interrupts();
 
