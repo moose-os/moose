@@ -1,9 +1,14 @@
+use alloc::format;
 use core::fmt::Write;
 
 use log::{Level, LevelFilter, Log, SetLoggerError};
+use monocle_protocol::MonocleLogSource;
 use x86_64::instructions::interrupts;
 
-use crate::{kernel::kernel_ref, subsystem::clock::time::LoggerTime};
+use crate::{
+    kernel::kernel_ref,
+    subsystem::{clock::time::LoggerTime, monocle_logger::monocle_logger},
+};
 
 static BOOT_LOGGER: BootLogger = BootLogger;
 
@@ -50,6 +55,34 @@ impl Log for BootLogger {
                 .clock
                 .get()
                 .map(|c| LoggerTime::from_mono_ns(c.monotonic_ns()));
+
+            if let Some(logger) = monocle_logger() {
+                if matches!(level, Level::Trace) {
+                    return;
+                }
+                let message = match (time, shortened_target.is_empty()) {
+                    (Some(time), false) => format!(
+                        "{} [{:<5}] [{:^6}] {}\n",
+                        time,
+                        level.as_str(),
+                        shortened_target,
+                        record.args()
+                    ),
+                    (Some(time), true) => {
+                        format!("{} [{:<5}] {}\n", time, level.as_str(), record.args())
+                    }
+                    (None, false) => format!(
+                        "[{:<5}] [{:^6}] {}\n",
+                        level.as_str(),
+                        shortened_target,
+                        record.args()
+                    ),
+                    (None, true) => format!("[{:<5}] {}\n", level.as_str(), record.args()),
+                };
+
+                logger.log_str(MonocleLogSource::Hypervisor, &message);
+                return;
+            }
 
             interrupts::without_interrupts(|| {
                 {

@@ -242,6 +242,7 @@ use core::{
 use bitfield_struct::bitfield;
 use hashbrown::HashMap;
 use log::debug;
+use monocle_protocol::MONOCLE_GUEST_ENDPOINT_GUID;
 use raw_cpuid::{CpuId, Hypervisor};
 use spin::rwlock::RwLock;
 use x86_64::{instructions::interrupts::without_interrupts, registers::model_specific::Msr};
@@ -1423,7 +1424,10 @@ impl HyperV {
     pub fn process_offer(&self, offer: &VmBusOfferChannel) {
         let guid = offer.channel_type;
 
-        let name = if guid.data[3] == 0x12 && guid.data[2] == 0x34 {
+        let name = if guid.data[3] == 0x12 && guid.data[2] == 0x34
+            || guid == Guid::from_str(MONOCLE_GUEST_ENDPOINT_GUID)
+            || offer.channel_instance == Guid::from_str(MONOCLE_GUEST_ENDPOINT_GUID)
+        {
             "Socket"
         } else {
             let found_entry = HYPERV_DEVICE_GUIDS
@@ -1441,7 +1445,7 @@ impl HyperV {
         };
 
         let channel_cstr = move || {
-            let mut channel = VmBusChannel::new(offer, 2 * PAGE_SIZE, 2 * PAGE_SIZE);
+            let mut channel = VmBusChannel::new(offer, 4 * PAGE_SIZE, 4 * PAGE_SIZE);
             channel.initialize();
 
             channel

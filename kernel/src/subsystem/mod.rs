@@ -4,6 +4,7 @@ pub mod clock;
 pub mod linker;
 pub mod logger;
 pub mod memory;
+pub mod monocle_logger;
 pub mod process;
 pub mod scheduler;
 pub mod syscall;

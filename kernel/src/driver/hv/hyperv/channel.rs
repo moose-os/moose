@@ -385,7 +385,8 @@ impl VmBusChannel {
         }
 
         let rx = &self.ring_buffer.rx;
-        let read_offset = unsafe { (*rx.header).read_offset as usize };
+        let read_offset =
+            unsafe { ptr::read_volatile(ptr::addr_of!((*rx.header).read_offset)) as usize };
 
         let header = unsafe { *(rx.data_start.add(read_offset) as *const VmBusNormalPacketHeader) };
         let header_size = header.header_len_qword as usize * 8;
@@ -467,7 +468,9 @@ impl VmBusChannel {
         // Here we fill in packet_len in QWORDs. Note: Header does not take into account the footer length.
         header.packet_len_qword = ((tx_len - footer_len) / 8) as u16;
 
-        let mut starting_offset = unsafe { *self.ring_buffer.tx.header }.write_offset;
+        let mut starting_offset = unsafe {
+            ptr::read_volatile(ptr::addr_of!((*self.ring_buffer.tx.header).write_offset))
+        };
         let footer = VmBusPacketFooter {
             reserved: 0,
             first_byte_of_packet: starting_offset,

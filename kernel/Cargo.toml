@@ -42,6 +42,10 @@ hashbrown = "*"
 bytemuck = "*"
 zerocopy = { version = "0.8", features = ["derive"] }
 
+iced-x86 = { version = "1.21.0", default-features = false, features = ["decoder", "nasm", "no_std", "no_vex", "no_evex", "no_xop"] }
+x86 = "*"
+monocle-protocol = { path = "../monocle-protocol" }
+
 [profile.dev]
 opt-level = 1
 panic = "abort"

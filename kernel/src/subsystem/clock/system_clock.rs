@@ -426,6 +426,12 @@ impl SystemClock {
         (ns as u128 * self.lapic_frequency as u128 / 1_000_000_000) as u32
     }
 
+    /// Returns current processor TSC counter frequency.
+    #[inline]
+    pub fn tsc_frequency(&self) -> u64 {
+        self.tsc_frequency
+    }
+
     /// Prints timer statistics to the console.
     fn print_timer_stats(name: &str, present: bool, _priority: u8, mean: u64, std_dev: u64) {
         let mean_ghz = mean / 1_000_000_000;
