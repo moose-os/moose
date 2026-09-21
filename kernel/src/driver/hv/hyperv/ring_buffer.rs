@@ -197,13 +197,14 @@ impl HyperVSingleRingBuffer {
     /// This updates `read_offset` in the header and wraps around if the end
     /// of the buffer is reached.
     pub fn advance_read_index(&self, read_bytes: u32) {
-        let current_offset = unsafe { (*self.header).read_offset };
+        let read_offset_ptr = unsafe { ptr::addr_of_mut!((*self.header).read_offset) };
+        let current_offset = unsafe { ptr::read_volatile(read_offset_ptr) };
         let new_offset = (current_offset + read_bytes) % self.ring_buffer_data_size() as u32;
 
         // @TODO: Check write_offset
 
         unsafe {
-            (*self.header).read_offset = new_offset;
+            ptr::write_volatile(read_offset_ptr, new_offset);
         }
     }
 
@@ -216,13 +217,13 @@ impl HyperVSingleRingBuffer {
     /// Returns the current write index (offset) in the ring buffer.
     #[inline]
     fn get_write_index(&self) -> usize {
-        unsafe { (*self.header).write_offset as usize }
+        unsafe { ptr::read_volatile(ptr::addr_of!((*self.header).write_offset)) as usize }
     }
 
     /// Returns the current read index (offset) in the ring buffer.
     #[inline]
     fn get_read_index(&self) -> usize {
-        unsafe { (*self.header).read_offset as usize }
+        unsafe { ptr::read_volatile(ptr::addr_of!((*self.header).read_offset)) as usize }
     }
 }
 
@@ -341,7 +342,9 @@ impl HyperVDoubledRingBuffer {
     /// - Caller must ensure `index` is valid for the TX buffer size.
     #[inline]
     pub fn update_tx_writer_index(&self, index: u32) {
-        unsafe { (*self.tx.header).write_offset = index };
+        unsafe {
+            ptr::write_volatile(ptr::addr_of_mut!((*self.tx.header).write_offset), index);
+        }
     }
 
     /// Determines whether the host should be signaled.

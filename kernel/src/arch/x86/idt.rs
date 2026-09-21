@@ -5,9 +5,8 @@ use bitfield_struct::bitfield;
 use spin::Mutex;
 use x86_64::registers::control::Cr2;
 
-use crate::driver::apic::raw_syscall_interrupt_handler;
-
 use super::gdt::KERNEL_MODE_CODE_SEGMENT_INDEX;
+use crate::driver::apic::raw_syscall_interrupt_handler;
 
 const_assert!(size_of::<Idt>() == 256 * 16);
 

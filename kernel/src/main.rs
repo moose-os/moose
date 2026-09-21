@@ -18,6 +18,8 @@ mod kernel;
 mod panic;
 mod subsystem;
 
+use alloc::{boxed::Box, sync::Arc};
+
 use raw_cpuid::{CpuId, Hypervisor};
 
 use crate::{
@@ -26,9 +28,33 @@ use crate::{
         cpu::ProcessorControlBlock,
         gdt::{load_tss, setup_tss},
     },
-    driver::{acpi::initialize_acpica, apic::LocalApic, hv::hyperv::HyperV},
+    driver::{
+        acpi::initialize_acpica,
+        apic::LocalApic,
+        hv::{
+            hyperv::HyperV,
+            reindeer::{
+                BootSource, VmOptionsBuilder,
+                backend::initialize_hypervisor,
+                device::{
+                    legacy::{
+                        rtc::VirtualRealTimeClockDevice,
+                        serial::{VirtualSerialPort, VirtualSerialPortBackingDevice},
+                    },
+                    pci::VirtualPciHostBridge,
+                },
+                run_loop::run_guest_loop,
+            },
+        },
+        serial::SerialPort,
+    },
     kernel::{VirtualizedDevicesManager, kernel_ref},
-    subsystem::{logger::init_logger, process::DEFAULT_THREAD_PRIORITY, scheduler::Scheduler},
+    subsystem::{
+        logger::init_logger,
+        monocle_logger::{MonocleLogger, monocle_logger, try_register},
+        process::DEFAULT_THREAD_PRIORITY,
+        scheduler::Scheduler,
+    },
 };
 
 #[unsafe(no_mangle)]
@@ -126,6 +152,10 @@ unsafe extern "C" fn _start() -> ! {
         };
 
         hv.spawn_worker_thread();
+
+        kernel_ref()
+            .spawn_kernel_thread(init_vm, 0, DEFAULT_THREAD_PRIORITY + 1)
+            .unwrap();
     }
 
     enable_interrupts();
@@ -147,3 +177,47 @@ fn spawn_test_processes() {
         .spawn_process(PROGRAM_2, DEFAULT_THREAD_PRIORITY)
         .unwrap();
 }
+
+extern "C" fn init_vm(_arg: u64) -> ! {
+    let vmm = initialize_hypervisor().expect("hypervisor initialization failed");
+
+    // @TODO: need to call this for each core once in a lifetime
+    vmm.initialize().unwrap();
+
+    try_register(MonocleLogger::connect().unwrap());
+
+    let serial_backing = monocle_logger()
+        .map(|logger| VirtualSerialPortBackingDevice::Remote(Arc::clone(logger)))
+        .unwrap_or_else(|| {
+            let guest_serial = SerialPort::COM1
+                .open()
+                .expect("failed to open host serial for guest UART passthrough");
+            VirtualSerialPortBackingDevice::Com(guest_serial)
+        });
+
+    let options = VmOptionsBuilder::default()
+        .memory(256)
+        .vcpus(1)
+        .device(VirtualSerialPort::new(0x3F8, serial_backing, 1))
+        .device(VirtualPciHostBridge::new())
+        .device(VirtualRealTimeClockDevice::new())
+        .boot_source(BootSource::LinuxBootProtocol {
+            vmlinuz: Box::from(LINUX_VMLINUZ),
+            initial_ramdisk: Box::from(LINUX_INITRAMFS),
+            command_line: alloc::string::String::from(
+                "moose=serial-initrd loglevel=8 ignore_loglevel console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 rdinit=/bin/sh initramfs_async=0 retain_initrd pata_legacy.probe_mask=0 libata.force=disable scsi_mod.scan=none mitigations=off srbds=off pci=off",
+            ),
+        })
+        .build()
+        .expect("invalid VM options");
+
+    let vm = vmm.create_vm(&options).expect("Failed to create VM");
+    let vcpu = vm.write().add_vcpu(0).expect("Failed to add vCPU");
+
+    run_guest_loop(vm, vcpu).expect("vCPU run loop returned unexpectedly");
+
+    panic!("vCPU run loop exited");
+}
+
+static LINUX_VMLINUZ: &[u8] = include_bytes!("../../assets/vmlinuz");
+static LINUX_INITRAMFS: &[u8] = include_bytes!("../../assets/initramfs.cpio");

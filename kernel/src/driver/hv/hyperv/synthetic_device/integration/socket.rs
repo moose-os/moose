@@ -245,7 +245,7 @@ impl VmBusSocket {
             ptr::copy_nonoverlapping(&pipe as *const _ as *const u8, ptr, pipe_len);
 
             if !buf.is_empty() {
-                ptr::copy_nonoverlapping(payload.as_ptr(), ptr.add(pipe_len), buf.len());
+                ptr::copy_nonoverlapping(payload.as_ptr(), ptr.add(pipe_len), payload.len());
             }
         }
 
