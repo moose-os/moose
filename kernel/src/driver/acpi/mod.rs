@@ -5,15 +5,10 @@ mod madt;
 mod rsdp;
 mod sdt;
 
-pub use acpica::*;
-pub use devices::*;
-pub use madt::*;
-pub use rsdp::*;
-pub use sdt::*;
-
 use alloc::{boxed::Box, sync::Arc};
 use core::{mem, ptr, slice};
 
+pub use acpica::*;
 use acpica_rs::{
     AE_OK, set_os_services_implementation,
     sys::{
@@ -21,6 +16,10 @@ use acpica_rs::{
         AcpiInitializeSubsystem, AcpiInitializeTables, AcpiLoadTables,
     },
 };
+pub use devices::*;
+pub use madt::*;
+pub use rsdp::*;
+pub use sdt::*;
 
 use crate::subsystem::memory::{
     CurrentAddressSpace, Exact, Frame, Identity, MemoryError, Page, PageFlags, PhysicalAddress,

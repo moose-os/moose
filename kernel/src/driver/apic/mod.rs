@@ -1,12 +1,11 @@
 mod io_apic;
 mod local_apic;
 
-pub use io_apic::*;
-pub use local_apic::*;
-
 use alloc::{alloc::alloc_zeroed, vec::Vec};
 use core::{alloc::Layout, arch::asm, hint, ptr};
 
+pub use io_apic::*;
+pub use local_apic::*;
 use raw_cpuid::CpuId;
 use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;

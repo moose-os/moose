@@ -2,6 +2,7 @@ pub mod acpi;
 pub mod apic;
 pub mod ata;
 pub mod clock;
+pub mod hv;
 pub mod net;
 pub mod pci;
 pub mod pic;
