@@ -1,13 +1,33 @@
-use alloc::fmt;
+//! # Network driver layer
+//!
+//! Core types shared by the whole network stack.
+//!
 
-use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout, network_endian::U16};
+use alloc::{
+    fmt, format,
+    string::{String, ToString},
+    sync::Arc,
+    vec::Vec,
+};
+use core::sync::atomic::{AtomicU64, Ordering};
+
+use zerocopy::{FromBytes, Immutable, IntoBytes, KnownLayout};
 
 pub mod nic;
+pub mod proto;
+pub mod rx_process_thread;
 
+pub use nic::NetworkCard;
+pub use rx_process_thread::{RxProcessThread, spawn_rx_worker};
+
+use crate::subsystem::sync::IrqGuardedRwLock;
+
+/// A 48-bit Ethernet MAC address.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, FromBytes, IntoBytes, Immutable, KnownLayout)]
 pub struct MacAddress(pub [u8; 6]);
 
 impl MacAddress {
+    /// The Ethernet broadcast address, `FF:FF:FF:FF:FF:FF`.
     pub fn broadcast() -> Self {
         Self([0xFF; 6])
     }
@@ -24,138 +44,7 @@ impl fmt::Debug for MacAddress {
     }
 }
 
-#[repr(u16)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum EtherType {
-    Cdp = 0x2000,
-    Stp = 0x42,
-    Ipv4 = 0x0800,                // IPv4
-    Arp = 0x0806,                 // ARP
-    WakeOnLan = 0x0842,           // Wake-on‑LAN
-    ReverseArp = 0x8035,          // RARP
-    AppleTalk = 0x809B,           // EtherTalk
-    Aarp = 0x80F3,                // AppleTalk ARP
-    Vlan = 0x8100,                // IEEE 802.1Q VLAN tag
-    Slpp = 0x8102,                // Simple Loop Prevention Protocol
-    Vlacp = 0x8103,               // Virtual Link Aggregation Control Protocol
-    Ipx = 0x8137,                 // IPX
-    Qnx = 0x8204,                 // QNX Qnet
-    Ipv6 = 0x86DD,                // IPv6
-    EthernetFlowControl = 0x8808, // Ethernet flow control
-    SlowProtocols = 0x8809,       // LACP etc.
-    CobraNet = 0x8819,
-    MplsUnicast = 0x8847,   // MPLS unicast
-    MplsMulticast = 0x8848, // MPLS multicast
-    PPPoEDiscovery = 0x8863,
-    PPPoESession = 0x8864,
-    HomePlugMME = 0x887B,
-    EapOverLan = 0x888E, // 802.1X
-    Profinet = 0x8892,
-    HyperScsi = 0x889A,
-    ATAoE = 0x88A2,
-    EtherCAT = 0x88A4,
-    QinQ = 0x88A8, // provider bridging
-    Powerlink = 0x88AB,
-    Lldp = 0x88CC, // Link Layer Discovery Protocol
-    SercosIII = 0x88CD,
-    HomePlugGreenPhy = 0x88E1,
-    MediaRedundancy = 0x88E3,
-    MacSec = 0x88E5,
-    ProviderBackbone = 0x88E7, // PBB IEEE 802.1ah
-    Ptp = 0x88F7,              // Precision Time Protocol
-    NcSi = 0x88F8,
-    Prp = 0x88FB,      // Parallel Redundancy Protocol
-    Cfm = 0x8902,      // Connectivity Fault Management / Y.1731
-    FCoE = 0x8906,     // Fibre Channel over Ethernet
-    FCoEInit = 0x8914, // Initialization Protocol
-    RoCE = 0x8915,     // RDMA over Converged Ethernet
-    TTEthernet = 0x891D,
-    IEEE1905_1 = 0x893A,
-    Hsr = 0x892F,
-    ConfigTest = 0x9000,    // configuration testing
-    Qinq9100 = 0x9100,      // Q‑in‑Q / loopback
-    RedundancyTag = 0xF1C1, // IEEE 802.1CB
-}
-
-impl TryFrom<u16> for EtherType {
-    type Error = u16;
-
-    fn try_from(value: u16) -> Result<Self, Self::Error> {
-        match value {
-            0x0800 => Ok(EtherType::Ipv4),
-            0x0806 => Ok(EtherType::Arp),
-            0x0842 => Ok(EtherType::WakeOnLan),
-            0x2000 => Ok(EtherType::Cdp),
-            0x8035 => Ok(EtherType::ReverseArp),
-            0x809B => Ok(EtherType::AppleTalk),
-            0x80F3 => Ok(EtherType::Aarp),
-            0x8100 => Ok(EtherType::Vlan),
-            0x8102 => Ok(EtherType::Slpp),
-            0x8103 => Ok(EtherType::Vlacp),
-            0x8137 => Ok(EtherType::Ipx),
-            0x8204 => Ok(EtherType::Qnx),
-            0x86DD => Ok(EtherType::Ipv6),
-            0x8808 => Ok(EtherType::EthernetFlowControl),
-            0x8809 => Ok(EtherType::SlowProtocols),
-            0x8819 => Ok(EtherType::CobraNet),
-            0x8847 => Ok(EtherType::MplsUnicast),
-            0x8848 => Ok(EtherType::MplsMulticast),
-            0x8863 => Ok(EtherType::PPPoEDiscovery),
-            0x8864 => Ok(EtherType::PPPoESession),
-            0x887B => Ok(EtherType::HomePlugMME),
-            0x888E => Ok(EtherType::EapOverLan),
-            0x8892 => Ok(EtherType::Profinet),
-            0x889A => Ok(EtherType::HyperScsi),
-            0x88A2 => Ok(EtherType::ATAoE),
-            0x88A4 => Ok(EtherType::EtherCAT),
-            0x88A8 => Ok(EtherType::QinQ),
-            0x88AB => Ok(EtherType::Powerlink),
-            0x88CC => Ok(EtherType::Lldp),
-            0x88CD => Ok(EtherType::SercosIII),
-            0x88E1 => Ok(EtherType::HomePlugGreenPhy),
-            0x88E3 => Ok(EtherType::MediaRedundancy),
-            0x88E5 => Ok(EtherType::MacSec),
-            0x88E7 => Ok(EtherType::ProviderBackbone),
-            0x88F7 => Ok(EtherType::Ptp),
-            0x88F8 => Ok(EtherType::NcSi),
-            0x88FB => Ok(EtherType::Prp),
-            0x8902 => Ok(EtherType::Cfm),
-            0x8906 => Ok(EtherType::FCoE),
-            0x8914 => Ok(EtherType::FCoEInit),
-            0x8915 => Ok(EtherType::RoCE),
-            0x891D => Ok(EtherType::TTEthernet),
-            0x893A => Ok(EtherType::IEEE1905_1),
-            0x892F => Ok(EtherType::Hsr),
-            0x9000 => Ok(EtherType::ConfigTest),
-            0x9100 => Ok(EtherType::Qinq9100),
-            0xF1C1 => Ok(EtherType::RedundancyTag),
-            _ => Err(value),
-        }
-    }
-}
-
-#[repr(C, packed)]
-#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Debug, Copy, Clone)]
-pub struct EthernetFrameHeader {
-    pub destination_mac: [u8; 6],
-    pub source_mac: [u8; 6],
-    pub ether_type: U16,
-}
-
-impl EthernetFrameHeader {
-    pub fn destination_mac(&self) -> MacAddress {
-        MacAddress(self.destination_mac)
-    }
-
-    pub fn source_mac(&self) -> MacAddress {
-        MacAddress(self.source_mac)
-    }
-
-    pub fn ether_type(&self) -> Result<EtherType, u16> {
-        EtherType::try_from(self.ether_type.get())
-    }
-}
-
+/// An IPv4 address: four octets in network order.
 #[repr(C, packed)]
 #[derive(
     Clone, Copy, PartialEq, Eq, Hash, FromBytes, IntoBytes, Immutable, KnownLayout, Ord, PartialOrd,
@@ -173,7 +62,7 @@ impl From<[u8; 4]> for Ipv4Addr {
 
 impl Ipv4Addr {
     /// Create a new IPv4 address from raw bytes.
-    pub fn new(octets: [u8; 4]) -> Self {
+    pub const fn new(octets: [u8; 4]) -> Self {
         Self { octets }
     }
 
@@ -181,8 +70,19 @@ impl Ipv4Addr {
     pub fn octets(&self) -> [u8; 4] {
         self.octets
     }
+
+    /// `0.0.0.0`.
+    pub const fn unspecified() -> Self {
+        Self::new([0, 0, 0, 0])
+    }
+
+    /// `255.255.255.255`.
+    pub const fn broadcast() -> Self {
+        Self::new([255, 255, 255, 255])
+    }
 }
 
+/// Address as a host-order integer, first octet in the top byte.
 impl From<Ipv4Addr> for u32 {
     fn from(ip: Ipv4Addr) -> Self {
         let [a, b, c, d] = ip.octets;
@@ -214,53 +114,619 @@ impl fmt::Display for Ipv4Addr {
 
 impl fmt::Debug for Ipv4Addr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}.{}.{}.{}",
-            self.octets[0], self.octets[1], self.octets[2], self.octets[3]
-        )
+        fmt::Display::fmt(self, f)
     }
 }
 
-/// IPv4 Header Structure (RFC 791)
-///
-/// ### Header Diagram (32-bit words)
-/// ```text
-///  0                   1                   2                   3
-///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |Version|  IHL  |Type of Service|          Total Length         |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |         Identification        |Flags|      Fragment Offset    |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |  Time to Live |    Protocol   |         Header Checksum       |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                       Source Address                          |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// |                    Destination Address                        |
-/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
-/// ```
-#[repr(C, packed)]
+/// Index of an interface in the [`NetworkInterfaceTable`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NetworkInterfaceId(pub u16);
+
+/// One network interface: its identity, its IPv4 address (once it has
+/// one) and the card behind it.
+#[derive(Clone)]
+pub struct NetworkInterface {
+    pub interface_id: NetworkInterfaceId,
+    pub local_mac_address: MacAddress,
+    pub local_internet_address: Option<Ipv4Addr>,
+    pub nic: Option<Arc<dyn NetworkCard>>,
+}
+
+impl fmt::Debug for NetworkInterface {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("NetworkInterface")
+            .field("interface_id", &self.interface_id)
+            .field("local_mac_address", &self.local_mac_address)
+            .field("local_internet_address", &self.local_internet_address)
+            .field("nic", &self.nic.is_some())
+            .finish()
+    }
+}
+
+/// Maximum number of interfaces.
+pub const MAX_NETWORK_INTERFACES: usize = 64;
+
+const _: () = assert!(MAX_NETWORK_INTERFACES <= u64::BITS as usize);
+
+/// Fixed-size registry of network interfaces.
+pub struct NetworkInterfaceTable {
+    /// Array of NICs.
+    entries: IrqGuardedRwLock<[NetworkInterface; MAX_NETWORK_INTERFACES]>,
+
+    /// Bit `i` set = slot `i` holds a real interface.
+    occupied: AtomicU64,
+}
+
+impl NetworkInterfaceTable {
+    pub fn new(default: NetworkInterface) -> Self {
+        Self {
+            entries: IrqGuardedRwLock::new([(); MAX_NETWORK_INTERFACES].map(|_| default.clone())),
+            occupied: AtomicU64::new(0),
+        }
+    }
+
+    /// Registers an interface in the first free slot and returns its ID,
+    /// or `None` if the table is full.
+    pub fn insert(&self, interface: NetworkInterface) -> Option<NetworkInterfaceId> {
+        let mut entries = self.entries.write();
+
+        let free_mask = !self.occupied.load(Ordering::Acquire);
+        if free_mask == 0 {
+            return None;
+        }
+
+        let index = free_mask.trailing_zeros() as usize;
+        let id = NetworkInterfaceId(index as u16);
+
+        let mut interface = interface;
+        interface.interface_id = id;
+        entries[index] = interface;
+
+        self.occupied.fetch_or(1u64 << index, Ordering::Release);
+
+        Some(id)
+    }
+
+    /// Calls `f` for every registered interface.
+    pub fn for_each_occupied(&self, mut f: impl FnMut(NetworkInterfaceId, &NetworkInterface)) {
+        let occupied = self.occupied.load(Ordering::Acquire);
+        if occupied == 0 {
+            return;
+        }
+
+        let snapshot: Vec<(NetworkInterfaceId, NetworkInterface)> = {
+            let entries = self.entries.read();
+            (0..MAX_NETWORK_INTERFACES)
+                .filter(|index| (occupied & (1u64 << index)) != 0)
+                .map(|index| (NetworkInterfaceId(index as u16), entries[index].clone()))
+                .collect()
+        };
+
+        for (id, interface) in &snapshot {
+            f(*id, interface);
+        }
+    }
+
+    /// Calls `f` for every attached card.
+    pub fn for_each_nic(&self, mut f: impl FnMut(&dyn NetworkCard)) {
+        let occupied = self.occupied.load(Ordering::Acquire);
+        let nics: Vec<Arc<dyn NetworkCard>> = {
+            let entries = self.entries.read();
+            let mut nics = Vec::new();
+
+            for index in 0..MAX_NETWORK_INTERFACES {
+                if (occupied & (1u64 << index)) == 0 {
+                    continue;
+                }
+                if let Some(nic) = entries[index].nic.as_ref() {
+                    nics.push(Arc::clone(nic));
+                }
+            }
+
+            nics
+        };
+
+        for nic in nics {
+            f(nic.as_ref());
+        }
+    }
+
+    /// Returns a copy of the interface.
+    pub fn get(&self, id: NetworkInterfaceId) -> Option<NetworkInterface> {
+        let index = id.0 as usize;
+        if index >= MAX_NETWORK_INTERFACES {
+            return None;
+        }
+
+        let mask = 1u64 << index;
+
+        if (self.occupied.load(Ordering::Acquire) & mask) == 0 {
+            return None;
+        }
+
+        Some(self.entries.read()[index].clone())
+    }
+
+    /// Modifies an interface in place.
+    pub fn update(&self, id: NetworkInterfaceId, f: impl FnOnce(&mut NetworkInterface)) -> bool {
+        let index = id.0 as usize;
+        if index >= MAX_NETWORK_INTERFACES {
+            return false;
+        }
+
+        let mask = 1u64 << index;
+
+        if (self.occupied.load(Ordering::Acquire) & mask) == 0 {
+            return false;
+        }
+
+        let mut entries = self.entries.write();
+
+        f(&mut entries[index]);
+
+        true
+    }
+}
+
+use crate::subsystem::clock::time::{Duration, Instant};
+
+/// One slot of a [`TtlCache`].
 #[derive(Debug, Clone, Copy)]
-pub struct Ipv4Header {
-    /// Version (4 bits) + Internet Header Length (4 bits)
-    pub version_ihl: u8,
-    /// Differentiated Services Code Point (6 bits) + Explicit Congestion Notification (2 bits)
-    pub dscp_ecn: u8,
-    /// Total length of the datagram (header + data) in bytes
-    pub total_length: u16,
-    /// Unique identifier for fragments of a single datagram
-    pub identification: u16,
-    /// Control flags (3 bits) + Fragment offset (13 bits)
-    pub flags_fragment: u16,
-    /// Datagram lifetime to prevent routing loops
-    pub ttl: u8,
-    /// Next level protocol (e.g., TCP = 6, UDP = 17)
-    pub protocol: u8,
-    /// Error-checking for the header
-    pub header_checksum: u16,
-    /// IPv4 address of the sender
-    pub source_address: Ipv4Addr,
-    /// IPv4 address of the receiver
-    pub dest_address: Ipv4Addr,
+struct CacheEntry<K: Copy, V: Copy> {
+    is_occupied: bool,
+    key: K,
+    value: V,
+    expires_at: Option<Instant>,
+    last_access_at: Option<Instant>,
+}
+
+impl<K: Copy, V: Copy> CacheEntry<K, V> {
+    pub const fn empty(key: K, value: V) -> Self {
+        Self {
+            is_occupied: false,
+            key,
+            value,
+            expires_at: None,
+            last_access_at: None,
+        }
+    }
+
+    fn is_expired(&self, now: Instant) -> bool {
+        match self.expires_at {
+            Some(expires_at) => now >= expires_at,
+            None => true,
+        }
+    }
+}
+
+/// Fixed-capacity cache with per-entry expiry and no heap allocation.
+pub struct TtlCache<K: Copy + Eq, V: Copy, const N: usize> {
+    entries: IrqGuardedRwLock<[CacheEntry<K, V>; N]>,
+    default_time_to_live: Duration,
+}
+
+impl<K: Copy + Eq, V: Copy, const N: usize> TtlCache<K, V, N> {
+    /// Creates an empty cache.
+    pub const fn new(empty_key: K, empty_value: V, default_time_to_live: Duration) -> Self {
+        Self {
+            entries: IrqGuardedRwLock::new([CacheEntry::empty(empty_key, empty_value); N]),
+            default_time_to_live,
+        }
+    }
+
+    /// Looks up a key.
+    pub fn lookup(&self, key: K) -> Option<V> {
+        let now = Instant::now();
+        let mut entries = self.entries.write();
+
+        for entry in entries.iter_mut() {
+            if !entry.is_occupied || entry.key != key {
+                continue;
+            }
+
+            if entry.is_expired(now) {
+                entry.is_occupied = false;
+                entry.expires_at = None;
+                entry.last_access_at = None;
+                return None;
+            }
+
+            entry.last_access_at = Some(now);
+            return Some(entry.value);
+        }
+
+        None
+    }
+
+    /// Inserts with the cache's default TTL.
+    pub fn insert(&self, key: K, value: V) {
+        self.insert_with_ttl(key, value, self.default_time_to_live);
+    }
+
+    /// Inserts with a custom TTL.
+    pub fn insert_with_ttl(&self, key: K, value: V, time_to_live: Duration) {
+        let now = Instant::now();
+        let expires_at = Some(now + time_to_live);
+
+        let mut entries = self.entries.write();
+
+        // 1) Update an existing entry.
+        for entry in entries.iter_mut() {
+            if entry.is_occupied && entry.key == key {
+                entry.value = value;
+                entry.expires_at = expires_at;
+                entry.last_access_at = Some(now);
+                return;
+            }
+        }
+
+        // 2) Reuse a free or expired slot.
+        for entry in entries.iter_mut() {
+            if !entry.is_occupied || entry.is_expired(now) {
+                *entry = CacheEntry {
+                    is_occupied: true,
+                    key,
+                    value,
+                    expires_at,
+                    last_access_at: Some(now),
+                };
+                return;
+            }
+        }
+
+        // 3) Full: evict the least recently used.
+        let mut lru_index = 0usize;
+        for i in 1..N {
+            let a = entries[i].last_access_at;
+            let b = entries[lru_index].last_access_at;
+
+            let i_is_older = match (a, b) {
+                (None, None) => false,
+                (None, Some(_)) => true,
+                (Some(_), None) => false,
+                (Some(ai), Some(bi)) => ai < bi,
+            };
+
+            if i_is_older {
+                lru_index = i;
+            }
+        }
+
+        entries[lru_index] = CacheEntry {
+            is_occupied: true,
+            key,
+            value,
+            expires_at,
+            last_access_at: Some(now),
+        };
+    }
+
+    /// Drops every expired entry.
+    pub fn purge_expired(&self) {
+        let now = Instant::now();
+        let mut entries = self.entries.write();
+
+        for entry in entries.iter_mut() {
+            if entry.is_occupied && entry.is_expired(now) {
+                entry.is_occupied = false;
+                entry.expires_at = None;
+                entry.last_access_at = None;
+            }
+        }
+    }
+
+    /// Number of unexpired entries.
+    pub fn len(&self) -> usize {
+        let now = Instant::now();
+        let mut count = 0usize;
+
+        let entries = self.entries.read();
+        for entry in entries.iter() {
+            if entry.is_occupied && !entry.is_expired(now) {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
+/// An IPv4 prefix in CIDR notation, e.g. `192.168.1.0/24`. Only the
+/// first `mask_len` bits of `address` matter; the rest are ignored when
+/// matching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Ipv4Prefix {
+    pub address: Ipv4Addr,
+    pub mask_len: u8,
+}
+
+impl Ipv4Prefix {
+    /// Panics if `mask_len > 32`.
+    pub const fn new(address: Ipv4Addr, mask_len: u8) -> Self {
+        assert!(mask_len <= 32, "IPv4 prefix length must be 0..=32");
+
+        Self { address, mask_len }
+    }
+
+    /// Whether `ip` falls inside this prefix.
+    #[inline]
+    pub fn contains(&self, ip: Ipv4Addr) -> bool {
+        let mask = self.mask_u32();
+
+        (u32::from(self.address) & mask) == (u32::from(ip) & mask)
+    }
+
+    /// The netmask as a host-order integer.
+    #[inline]
+    pub fn mask_u32(&self) -> u32 {
+        match self.mask_len {
+            0 => 0,
+            32 => u32::MAX,
+            n => u32::MAX << (32 - n as u32),
+        }
+    }
+}
+
+/// Where a route sends traffic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NextHop {
+    /// Destination is on the local link: ARP for the target itself.
+    Direct,
+
+    /// Send via a router: ARP for the gateway, not the target.
+    Gateway(Ipv4Addr),
+}
+
+/// One routing table row: prefix, outgoing interface, and route data.
+#[derive(Debug, Clone)]
+pub struct RouteEntry<V> {
+    pub prefix: Ipv4Prefix,
+    pub interface_id: NetworkInterfaceId,
+    pub data: V,
+}
+
+/// A simple IPv4 routing table using longest prefix match (LPM).
+///
+/// Entries are kept sorted by descending `mask_len`, so the first
+/// match in a linear scan is the longest one.
+pub struct Ipv4RoutingTable<V> {
+    entries: Vec<RouteEntry<V>>,
+}
+
+impl<V> Ipv4RoutingTable<V> {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    /// Adds a route, or replaces the existing one with the same prefix
+    /// on the same interface.
+    pub fn insert_for_interface(
+        &mut self,
+        prefix: Ipv4Prefix,
+        interface_id: NetworkInterfaceId,
+        data: V,
+    ) {
+        self.entries
+            .retain(|entry| entry.prefix != prefix || entry.interface_id != interface_id);
+
+        let entry = RouteEntry {
+            prefix,
+            interface_id,
+            data,
+        };
+
+        let pos = self
+            .entries
+            .iter()
+            .position(|e| e.prefix.mask_len < prefix.mask_len)
+            .unwrap_or(self.entries.len());
+
+        self.entries.insert(pos, entry);
+    }
+
+    /// The best (longest-prefix) route for `ip`.
+    pub fn lookup_entry(&self, ip: Ipv4Addr) -> Option<&RouteEntry<V>> {
+        self.entries.iter().find(|entry| entry.prefix.contains(ip))
+    }
+
+    /// Just the route data of the best match.
+    pub fn lookup(&self, ip: Ipv4Addr) -> Option<&V> {
+        self.lookup_entry(ip).map(|entry| &entry.data)
+    }
+
+    /// Outgoing interface plus route data of the best match.
+    pub fn lookup_with_interface(&self, ip: Ipv4Addr) -> Option<(NetworkInterfaceId, &V)> {
+        self.lookup_entry(ip)
+            .map(|entry| (entry.interface_id, &entry.data))
+    }
+}
+
+impl Ipv4RoutingTable<NextHop> {
+    /// The IP to actually ARP for: the target itself for a direct route,
+    /// the gateway otherwise. `None` if there's no route at all.
+    pub fn resolve_next_hop(&self, target_ip: Ipv4Addr) -> Option<Ipv4Addr> {
+        self.lookup(target_ip).map(|next_hop| match next_hop {
+            NextHop::Direct => target_ip,
+            NextHop::Gateway(gateway_ip) => *gateway_ip,
+        })
+    }
+
+    pub fn resolve_next_hop_with_interface(
+        &self,
+        target_ip: Ipv4Addr,
+    ) -> Option<(NetworkInterfaceId, Ipv4Addr)> {
+        self.lookup_with_interface(target_ip)
+            .map(|(interface_id, next_hop)| {
+                let next_hop_ip = match next_hop {
+                    NextHop::Direct => target_ip,
+                    NextHop::Gateway(gateway_ip) => *gateway_ip,
+                };
+
+                (interface_id, next_hop_ip)
+            })
+    }
+
+    pub fn print(&self) {
+        const COL_DEST: &str = "Destination";
+        const COL_GW: &str = "Gateway";
+        const COL_FLAGS: &str = "Flags";
+        const COL_IF: &str = "If";
+
+        const DIRECT_GW: &str = "-.-.-.-";
+
+        let rows: Vec<(String, String, String, String)> = self
+            .entries
+            .iter()
+            .map(|entry| {
+                let dest = format!("{}/{}", entry.prefix.address, entry.prefix.mask_len);
+                let (gateway, flags) = match entry.data {
+                    NextHop::Direct => (DIRECT_GW.to_string(), "U".to_string()),
+                    NextHop::Gateway(gw) => (gw.to_string(), "UG".to_string()),
+                };
+                (dest, gateway, flags, entry.interface_id.0.to_string())
+            })
+            .collect();
+
+        let w_dest = rows
+            .iter()
+            .map(|r| r.0.len())
+            .chain([COL_DEST.len()])
+            .max()
+            .unwrap_or(COL_DEST.len())
+            .max(11);
+        let w_gw = rows
+            .iter()
+            .map(|r| r.1.len())
+            .chain([COL_GW.len(), DIRECT_GW.len()])
+            .max()
+            .unwrap_or(COL_GW.len());
+        let w_flags = rows
+            .iter()
+            .map(|r| r.2.len())
+            .chain([COL_FLAGS.len()])
+            .max()
+            .unwrap_or(COL_FLAGS.len())
+            .max(5);
+        let w_if = rows
+            .iter()
+            .map(|r| r.3.len())
+            .chain([COL_IF.len()])
+            .max()
+            .unwrap_or(COL_IF.len())
+            .max(2);
+
+        let widths = [w_dest, w_gw, w_flags, w_if];
+
+        let top = routing_table_border('┌', '┬', '┐', &widths);
+        let header_div = routing_table_border('├', '┼', '┤', &widths);
+        let bottom = routing_table_border('└', '┴', '┘', &widths);
+
+        log::debug!(
+            "IPv4 routing table ({} route{})",
+            self.entries.len(),
+            if self.entries.len() == 1 { "" } else { "s" }
+        );
+        log::debug!("{top}");
+        log::debug!(
+            "│ {:<w_dest$} │ {:<w_gw$} │ {:<w_flags$} │ {:>w_if$} │",
+            COL_DEST,
+            COL_GW,
+            COL_FLAGS,
+            COL_IF,
+        );
+
+        if rows.is_empty() {
+            log::debug!("{header_div}");
+            log::debug!(
+                "│ {:<w_dest$} │ {:<w_gw$} │ {:<w_flags$} │ {:>w_if$} │",
+                "(empty)",
+                "",
+                "",
+                "",
+            );
+        } else {
+            log::debug!("{header_div}");
+            for (dest, gateway, flags, iface) in rows {
+                log::debug!(
+                    "│ {:<w_dest$} │ {:<w_gw$} │ {:<w_flags$} │ {:>w_if$} │",
+                    dest,
+                    gateway,
+                    flags,
+                    iface,
+                );
+            }
+        }
+
+        log::debug!("{bottom}");
+        log::debug!("  U  = on-link (reachable directly on interface)");
+        log::debug!("  UG = via gateway (next hop is a router)");
+    }
+}
+
+/// One horizontal border line of the routing table box, sized to `widths`.
+fn routing_table_border(left: char, mid: char, right: char, widths: &[usize]) -> String {
+    let mut out = String::new();
+    out.push(left);
+
+    for (index, width) in widths.iter().enumerate() {
+        if index > 0 {
+            out.push(mid);
+        }
+        out.push_str(&"─".repeat(width + 2));
+    }
+
+    out.push(right);
+    out
+}
+
+/// A transport endpoint pair: local and remote address and port, plus
+/// the interface to send on.
+#[derive(Clone, Copy, Debug)]
+pub struct Socket {
+    remote_port: u16,
+    local_port: u16,
+
+    remote_address: Ipv4Addr,
+    local_address: Ipv4Addr,
+
+    nic: NetworkInterfaceId,
+}
+
+impl Socket {
+    pub fn local_port(&self) -> u16 {
+        self.local_port
+    }
+
+    pub fn remote_port(&self) -> u16 {
+        self.remote_port
+    }
+
+    pub fn local_address(&self) -> Ipv4Addr {
+        self.local_address
+    }
+
+    pub fn remote_address(&self) -> Ipv4Addr {
+        self.remote_address
+    }
+
+    pub fn nic(&self) -> NetworkInterfaceId {
+        self.nic
+    }
+
+    pub fn new(
+        local_address: Ipv4Addr,
+        local_port: u16,
+        remote_address: Ipv4Addr,
+        remote_port: u16,
+        nic: NetworkInterfaceId,
+    ) -> Self {
+        Self {
+            local_address,
+            local_port,
+            remote_address,
+            remote_port,
+            nic,
+        }
+    }
 }

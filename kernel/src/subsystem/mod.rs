@@ -7,5 +7,6 @@ pub mod memory;
 pub mod monocle_logger;
 pub mod process;
 pub mod scheduler;
+pub mod sync;
 pub mod syscall;
 pub mod terminal;

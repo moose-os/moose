@@ -19,7 +19,7 @@ if ($logs) {
 [void]$command.Append('-no-reboot ')
 [void]$command.Append('-cpu qemu64,apic,fsgsbase ')
 [void]$command.Append('-smp 4 ')
-[void]$command.Append('-m 256M ')
+[void]$command.Append('-m 1024M ')
 
 [void]$command.Append('-netdev tap,id=n1,ifname=tap ')
 [void]$command.Append('-device rtl8139,netdev=n1 ')

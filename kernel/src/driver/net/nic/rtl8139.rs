@@ -1,8 +1,7 @@
-use alloc::{boxed::Box, sync::Arc, vec};
-use core::slice;
+use alloc::{boxed::Box, sync::Arc};
+use core::{range::Range, slice};
 
 use raw_cpuid::{CpuId, Hypervisor};
-use spin::Mutex;
 use x86_64::instructions::interrupts::without_interrupts;
 
 use crate::{
@@ -16,12 +15,16 @@ use crate::{
     },
     driver::{
         apic::{DeliveryMode, DestinationMode, PinPolarity, RedirectionEntry, TriggerMode},
+        net::{MacAddress, NetworkCard, NetworkInterfaceId},
         pci::PciDevice,
     },
     kernel::kernel_ref,
-    subsystem::memory::{
-        CurrentAddressSpace, Exact, Frame, Identity, PAGE_SIZE, Page, PageFlags, PhysicalAddress,
-        VirtualAddress, memory_manager,
+    subsystem::{
+        memory::{
+            AnyIn, CurrentAddressSpace, Exact, Frame, FrameRange, PAGE_SIZE, Page, PageFlags,
+            PhysicalAddress, VirtualAddress, memory_manager,
+        },
+        sync::IrqGuardedMutex,
     },
 };
 
@@ -38,63 +41,94 @@ const CONFIG_1_REGISTER: u16 = 0x52;
 // Possible values: 8192, 16384, 32768, 65536
 const RX_RING_BUFFER_SIZE: usize = 65536;
 const RX_BUFFER_SIZE: usize = RX_RING_BUFFER_SIZE + 1518 + 4 + 4;
+const TX_BUF_SIZE: usize = 2048;
+const TX_BUFS: usize = 4;
 
 pub struct Rtl8139 {
-    inner: Arc<Mutex<Rtl8139Inner>>,
+    inner: Arc<IrqGuardedMutex<Rtl8139Inner>>,
+}
+
+impl Clone for Rtl8139 {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
 }
 
 impl Rtl8139 {
-    pub fn new(pci_device: Arc<Mutex<PciDevice>>) -> Rtl8139 {
+    pub fn new(pci_device: Arc<IrqGuardedMutex<PciDevice>>) -> Rtl8139 {
         let mut memory_manager = memory_manager().write();
 
-        // We use 64kb ring buffer for RX buffer and want to map first page after the last one,
-        // so we'll be able to read buffer without complex logic related to wrapping ring buffer.
-        //
-        // 64kb occupies 16 physical pages.
-        // We allocate them manually as we need to explicilty have 16 **physically contiguous** pages.
-        let mut frames = vec![];
-
-        for _ in 0..(RX_RING_BUFFER_SIZE / PAGE_SIZE) {
-            frames.push(memory_manager.allocate_frame().unwrap());
-        }
-
-        // Identity map frame buffer pages
-        for frame in &frames {
-            let page = Page::new(VirtualAddress::new(frame.address().as_u64()));
-
-            unsafe {
-                memory_manager
-                    .map(CurrentAddressSpace, Identity(&page), PageFlags::WRITABLE)
-                    .unwrap();
-            }
-        }
-
-        // Map start of the buffer right after the end
-        let page = Page::new(VirtualAddress::new(
-            frames.last().unwrap().address().as_u64() + PAGE_SIZE as u64,
+        let rx_page_count = RX_RING_BUFFER_SIZE / PAGE_SIZE;
+        let rx_first_frame = memory_manager
+            .allocate_frames_contiguous(rx_page_count)
+            .expect("physically contiguous RX ring");
+        let rx_last_frame = Frame::new(PhysicalAddress::new(
+            rx_first_frame.address().as_u64() + RX_RING_BUFFER_SIZE as u64,
         ));
-        let frame = Frame::new(PhysicalAddress::new(frames[0].address().as_u64()));
+
+        let rx_virt = unsafe {
+            memory_manager
+                .map_any_contiguous(
+                    CurrentAddressSpace,
+                    Range::from(256..512),
+                    FrameRange::new(rx_first_frame.address(), rx_last_frame.address()),
+                    PageFlags::WRITABLE,
+                )
+                .start()
+        };
+
+        let wrap_page = Page::new(VirtualAddress::new(
+            rx_virt.as_u64() + RX_RING_BUFFER_SIZE as u64,
+        ));
 
         unsafe {
             memory_manager
                 .map(
                     CurrentAddressSpace,
-                    Exact(&page, &frame),
+                    Exact(&wrap_page, &rx_first_frame),
                     PageFlags::WRITABLE,
                 )
                 .unwrap();
+        }
+
+        let rx_buffer = rx_virt.as_mut_ptr();
+        let rx_buffer_phys = rx_first_frame.address().as_u64() as u32;
+
+        let mut tx_buf: [*mut u8; TX_BUFS] = [core::ptr::null_mut(); TX_BUFS];
+        let mut tx_phys: [u32; TX_BUFS] = [0; TX_BUFS];
+        for i in 0..TX_BUFS {
+            let frame = memory_manager.allocate_frame().unwrap();
+            tx_buf[i] = unsafe {
+                memory_manager
+                    .map(
+                        CurrentAddressSpace,
+                        AnyIn(&frame, 256..512),
+                        PageFlags::WRITABLE,
+                    )
+                    .expect("map TX buffer")
+                    .page
+                    .address()
+                    .as_mut_ptr()
+            };
+            tx_phys[i] = frame.address().as_u64() as u32;
         }
 
         let bar0 = pci_device.lock().get_bar(0);
         assert_eq!(bar0 & 1, 1); // Safety check that device reports I/O address in first BAR.
 
         Self {
-            inner: Arc::new(Mutex::new(Rtl8139Inner {
+            inner: Arc::new(IrqGuardedMutex::new(Rtl8139Inner {
                 pci_device,
                 io_base: (bar0 & !0x3) as u16,
-                rx_buffer: frames[0].address().as_u64() as *mut u8,
+                rx_buffer,
+                rx_buffer_phys,
                 current_rx_offset: 0,
                 current_tx_index: 0,
+                interface_id: None,
+                tx_buf,
+                tx_phys,
             })),
         }
     }
@@ -175,18 +209,15 @@ impl Rtl8139 {
             }
 
             // Initialize receive buffer (RX)
-            let rx_buffer_physical_address = memory_manager()
-                .read()
-                .translate_virtual_address_to_physical_for_current_address_space(
-                    VirtualAddress::new(rtl8139.rx_buffer as u64),
-                )
-                .unwrap()
-                .as_u64();
+            outl(rtl8139.io_base + RBSTART_REGISTER, rtl8139.rx_buffer_phys);
 
-            outl(
-                rtl8139.io_base + RBSTART_REGISTER,
-                rx_buffer_physical_address as u32,
-            );
+            // Program TSAD[0..3] once with physical addresses.
+            for idx in 0..TX_BUFS {
+                outl(
+                    rtl8139.io_base + (0x20 + (idx as u16) * 4),
+                    rtl8139.tx_phys[idx],
+                );
+            }
 
             // Initialize interrupts
             //
@@ -223,38 +254,36 @@ impl Rtl8139 {
         });
     }
 
-    pub fn send_packet(&mut self, data: &[u8]) {
+    pub fn send_packet(&self, data: &[u8]) {
         // Safety checks
         assert!(data.len() < 1518);
         assert!(!data.is_empty());
 
-        let (transmit_buffer, transmit_status) = self.get_current_transmit_registers();
+        let mut inner = self.inner.lock();
+        let idx = inner.current_tx_index % TX_BUFS;
+        unsafe {
+            let dst = core::slice::from_raw_parts_mut(inner.tx_buf[idx], TX_BUF_SIZE);
+            dst[..data.len()].copy_from_slice(data);
+        }
+
+        outl(inner.io_base + (0x10 + (idx as u16) * 4), data.len() as u32);
+
+        inner.current_tx_index = (inner.current_tx_index + 1) % TX_BUFS;
+    }
+
+    pub fn mac_address(&self) -> MacAddress {
         let io_base = self.inner.lock().io_base;
+        let mut mac = [0u8; 6];
 
-        // Create buffer and copy user delivered data to it.
-        //
-        // It's needed mostly because we need to be aligned at the page boundary,
-        // the data can't be on two, not physically contiguous, page frames.
-        let mut tx_buffer = Box::new(TxBuffer([0u8; 1518]));
-        tx_buffer.as_mut().0[0..data.len()].copy_from_slice(data);
+        for (i, slot) in mac.iter_mut().enumerate() {
+            *slot = inb(io_base + i as u16);
+        }
 
-        // Get physical address of the buffer
-        let tx_buffer_virtual_address = &mut *tx_buffer as *mut TxBuffer;
-        let tx_buffer_phys_address = memory_manager()
-            .read()
-            .translate_virtual_address_to_physical_for_current_address_space(VirtualAddress::new(
-                tx_buffer_virtual_address.addr() as u64,
-            ))
-            .unwrap()
-            .as_u64();
+        MacAddress(mac)
+    }
 
-        // Safety check it fits in 32 bits
-        assert!(tx_buffer_phys_address < (1 << 32));
-
-        outl(io_base + transmit_buffer, tx_buffer_phys_address as u32);
-        outl(io_base + transmit_status, data.len() as u32);
-
-        self.adjust_transmit_registers();
+    pub fn set_interface_id(&self, interface_id: NetworkInterfaceId) {
+        self.inner.lock().interface_id = Some(interface_id);
     }
 
     fn get_current_transmit_registers(&self) -> (u16, u16) {
@@ -267,7 +296,7 @@ impl Rtl8139 {
         }
     }
 
-    fn adjust_transmit_registers(&mut self) {
+    fn adjust_transmit_registers(&self) {
         // RTL8139 has 4 transmit registers for sending data, and they are used with round-robin style.
         let mut inner = self.inner.lock();
 
@@ -280,11 +309,15 @@ impl Rtl8139 {
 }
 
 struct Rtl8139Inner {
-    pci_device: Arc<Mutex<PciDevice>>,
+    pci_device: Arc<IrqGuardedMutex<PciDevice>>,
     io_base: u16,
     rx_buffer: *mut u8,
+    rx_buffer_phys: u32,
     current_rx_offset: usize,
     current_tx_index: usize,
+    interface_id: Option<NetworkInterfaceId>,
+    tx_buf: [*mut u8; TX_BUFS],
+    tx_phys: [u32; TX_BUFS],
 }
 
 impl Rtl8139Inner {
@@ -316,12 +349,18 @@ impl Rtl8139Inner {
             // 4 is the data status and data length
             // 1518 is maximum Ethernet frame length
             // 4 is CRC32 checksum appended at the end of the data
-            let mut buffer = [0u8; 4 + 1518 + 4];
+            let total = length as usize;
+            if total >= 8
+                && let Some(interface_id) = self.interface_id
+            {
+                let frame = unsafe { slice::from_raw_parts(data_start.add(4), total - 4) };
+                kernel_ref()
+                    .network_subsystem()
+                    .rx_process_thread()
+                    .enqueue_frame(interface_id, frame);
 
-            buffer[..length as usize]
-                .copy_from_slice(unsafe { slice::from_raw_parts(data_start, length as usize) });
-
-            // @TODO: Pass buffer to the higher layers
+                debug!("queued for further processing");
+            }
 
             self.current_rx_offset = (self.current_rx_offset + length as usize + 4 + 3) & !3;
 
@@ -340,13 +379,16 @@ impl Rtl8139Inner {
     }
 }
 
+impl NetworkCard for Rtl8139 {
+    fn send_packet(&self, frame: &[u8]) {
+        self.send_packet(frame);
+    }
+}
+
 unsafe impl Send for Rtl8139Inner {}
 
 #[repr(C, align(4096))]
 struct RxBuffer([u8; RX_BUFFER_SIZE]);
-
-#[repr(C, align(4096))]
-struct TxBuffer([u8; 1518]);
 
 fn handle_rtl8139_interrupt(nic: &mut Rtl8139Inner) {
     let status = inw(nic.io_base + INTERRUPT_STATUS_REGISTER);

@@ -129,7 +129,7 @@ use crate::{
             HYPERV_PAGE_SIZE, VmBusGpaRange, VmBusOfferChannel, VmBusPacketHeader, VmBusPacketType,
             VmBusXferPageHeader, channel::VmBusChannel, synthetic_device::VmBusSyntheticDevice,
         },
-        net::{EthernetFrameHeader, MacAddress},
+        net::{MacAddress, NetworkInterfaceId},
     },
     kernel::{VirtualizedDevicesManager, kernel_ref},
     subsystem::{
@@ -1201,6 +1201,12 @@ pub struct VmBusNicState {
 
     /// Buffer of received RNDIS messages. (packet_id, packet_data)
     pub rndis_packet_buffer: HashMap<u32, Arc<PendingRequest>>,
+
+    /// Registered network interface id.
+    pub interface_id: Option<NetworkInterfaceId>,
+
+    /// Cached MAC address from RNDIS OID query.
+    pub mac_address: MacAddress,
 }
 
 unsafe impl Sync for VmBusNicState {}
@@ -1225,6 +1231,8 @@ impl VmBusNic {
                 tx_section_count: 0,
                 rndis_packet_buffer: HashMap::new(),
                 current_section_index: 0,
+                interface_id: None,
+                mac_address: MacAddress([0u8; 6]),
             }),
         }
     }
@@ -1245,6 +1253,12 @@ impl VmBusSyntheticDevice for VmBusNic {
         self.initialize_rndis();
 
         // !!! !!!! !!! This are blocking calls !!! !!! !!!
+        let mac = self.get_mac_address();
+
+        without_interrupts(|| {
+            self.state.write().mac_address = mac;
+        });
+
         debug!("MAC addr: {:?}", self.get_mac_address());
         debug!("Link status: {}", self.is_link_connected());
         debug!("Link speed: {} Mbps", self.get_link_speed());
@@ -1405,12 +1419,16 @@ impl VmBusNic {
                 let eth_slice =
                     unsafe { slice::from_raw_parts(eth_data, rndis_message.data.len as usize) };
 
-                let eth_frame_data = unsafe { *(eth_slice.as_ptr() as *const EthernetFrameHeader) };
-                debug!("Got ethernet packet: {:?}", eth_frame_data);
+                let interface_id = self
+                    .state
+                    .read()
+                    .interface_id
+                    .unwrap_or(NetworkInterfaceId(0));
 
-                // @TODO: Pass it to higher levels for processing
-                // let mut higher_level_data = [0u8; 1522];
-                // higher_level_data[..eth_slice.len()].copy_from_slice(eth_slice);
+                kernel_ref()
+                    .network_subsystem()
+                    .rx_process_thread()
+                    .enqueue_frame(interface_id, eth_slice);
             } else if rndis_message_type == RndisMessageType::Indicate {
                 // link went up/went down/something changed, need to track NIC state internally and react for such messages
                 let rndis_message = unsafe { *(data_ptr as *const RndisIndicateMessage) };
@@ -1418,6 +1436,14 @@ impl VmBusNic {
                 debug!("Got rndis indicate message: {rndis_message:?}");
             }
         }
+    }
+
+    pub fn set_interface_id(&self, interface_id: NetworkInterfaceId) {
+        self.state.write().interface_id = Some(interface_id);
+    }
+
+    pub fn mac_address(&self) -> MacAddress {
+        self.state.read().mac_address
     }
 
     /// Allocates send and receive buffers for the NetVSC device.
