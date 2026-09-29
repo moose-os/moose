@@ -1,0 +1,4113 @@
+﻿//! TCP protocol implementation — connection state machine, segment I/O, and extensions.
+//!
+//! **RFC:** [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293.html) (core TCP).
+//!
+//! This module is the Moose kernel's TCP stack. [`TcpDriver`] owns all connections;
+//! each [`TcpControlBlock`] holds sequence/state variables. Optional behaviors
+//! (SACK, Timestamps, ECN, CWV, pacing, CUBIC, etc.) live in submodules with
+//! structure definitions separated from the send/receive logic in this file.
+
+use alloc::{collections::VecDeque, sync::Arc, vec::Vec};
+use hashbrown::HashMap;
+use x86_64::instructions::random::RdRand;
+use zerocopy::{
+    FromBytes, Immutable, IntoBytes, KnownLayout,
+    network_endian::{U16, U32},
+};
+
+use crate::{
+    driver::net::{
+        Ipv4Addr, NetworkInterfaceId, Socket,
+        proto::{DEFAULT_HEADER_RESERVE, PacketBuffer, SLOT_SIZE, ip::IpProtocol},
+    },
+    kernel::kernel_ref,
+    subsystem::{
+        clock::time::{Duration, Instant},
+        scheduler::{Event, OneshotGate, block_on_event, current_thread, park_current_thread},
+        sync::IrqGuardedRwLock,
+    },
+};
+
+use super::tcp_socket::TcpSocketTable;
+
+mod abc;
+mod cc;
+mod cwv;
+mod ecn;
+mod eifel;
+mod frto;
+mod options;
+mod pacing;
+mod receive_buffer;
+mod sack;
+mod timestamp;
+
+#[allow(unused_imports)] // re-exported for external callers
+pub use cc::{CongestionControl, CubicState, RenoState, TcpCcSnapshot};
+pub use options::{TcpOption, TcpOptionsParser, TcpOptionsWriter};
+pub use receive_buffer::TcpReceiveBuffer;
+
+use abc::AbcState;
+use cwv::{CwvReduceReason, NewCwvState};
+use ecn::{IP_ECN_CE, IP_ECN_ECT0, TcpEcnState};
+use eifel::{EifelState, RetransmitCause, EIFEL_IW_BYTES};
+use frto::{FrtoPhase, FrtoState};
+use options::{TCP_OPTS_MAX, TCP_TS_OPTION_OVERHEAD};
+use pacing::PacingState;
+use sack::{SackBlock, SackRackState, DUP_THRESH, SACK_RX_RANGES_MAX};
+use timestamp::{RttMeasurementState, RttProbe, TcpTimestampState, PAWS_IDLE};
+
+/// TCP connection states as defined in [RFC 9293](https://www.rfc-editor.org/rfc/rfc9293.html).
+///
+/// ```text
+///                               +---------+ ---------\      active OPEN
+///                               |  CLOSED |            \    -----------
+///                               +---------+<---------\  \   create TCB
+///                                 |     ^              \  \
+///                    passive OPEN |     |   CLOSE       \  \
+///                    ------------ |     | ----------     \  \
+///                     create TCB  |     | delete TCB      \  \
+///                                 V     |                  \  V
+///                               +---------+            +----------+
+///                               |  LISTEN |            |  SYN-SENT|
+///                               +---------+            +----------+
+///                   rcv SYN      |     |                 |     ^
+///                  -----------   |     |     SEND        |     |
+///                   snd SYN,ACK  |     |    -------      |     |
+///                                V     |    snd SYN      |     |
+///                               +---------+              |     |
+///                               |   SYN   | <------------      |
+///                               |   RCVD  |          rcv SYN   |
+///                               +---------+      -----------   |
+///                   rcv ACK of SYN  |            snd SYN,ACK   |
+///                   --------------  |    rcv SYN               |
+///                           V       |   -----------            |
+///                       +---------+ |   snd ACK                |
+///                       |  ESTAB  |<-                          |
+///                       +---------+                            |
+///                        |     |                               |
+///            CLOSE       |     |    rcv FIN                    |
+///           -------      |     |    -------                    |
+///           snd FIN      |     |    snd ACK                    |
+///                        V     V                               |
+///          +---------+      +---------+                        |
+///          |  FIN    |      |  CLOSE  |                        |
+///          | WAIT-1  |      |   WAIT  |                        |
+///          +---------+      +---------+                        |
+///            |    |          |     |                           |
+///   rcv FIN  |    | rcv ACK  |     |  CLOSE                    |
+///   -------  |    | -------  |     | -------                   |
+///   snd ACK  |    |    V     |     | snd FIN                   |
+///            V    | +---------+    V                           |
+///       +---------+ |  FIN    |  +---------+                   |
+///       | CLOSING | | WAIT-2  |  | LAST-ACK|                   |
+///       +---------+ +---------+  +---------+                   |
+///            |          | rcv FIN  |     |                     |
+///   rcv ACK  |          | -------  |     | rcv ACK             |
+///   -------  |          | snd ACK  |     | -------             |
+///            V          V          |     V                     |
+///          +----------+            |    +---------+            |
+///          | TIME-WAIT| <----------     |  CLOSED |            |
+///          +----------+                 +---------+            |
+/// ```
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+pub enum TcpState {
+    Closed,
+    // Listen,
+    SynSent,
+    SynReceived,
+    Established,
+    FinWait1,
+    FinWait2,
+    CloseWait,
+    Closing,
+    LastAck,
+    TimeWait,
+}
+
+/// A segment that has been sent but not yet acknowledged.
+///
+/// Kept in the retransmission queue until cumulatively ACKed by the peer.
+#[derive(Debug, Clone)]
+pub struct UnackedSegment {
+    /// Sequence number of the first data byte.
+    pub seq: u32,
+    /// Buffered payload (empty for SYN/FIN-only segments).
+    pub data: Vec<u8>,
+    /// TCP control flags included in the original segment.
+    pub flags: u8,
+    /// When the segment was last transmitted (used for RTO checking).
+    pub send_time: Instant,
+    /// Number of retransmissions so far.
+    pub retries: u32,
+    /// RFC 7323: TSval on first transmission (Eifel Detection baseline).
+    pub first_tsval: Option<u32>,
+    /// RFC 3522: TSval on most recent timeout retransmission (`RetransmitTS`).
+    pub retransmit_tsval: Option<u32>,
+    /// RFC 2018: peer reported this segment in a SACK block (not yet cum-ACK).
+    pub sacked: bool,
+    /// RFC 6675 IsLost and/or RFC 8985 RACK declared this segment lost.
+    /// Eligible for selective retransmission; not counted in SACK pipe.
+    pub lost: bool,
+    /// Transmit timestamp for RACK (updated on every (re)transmit).
+    pub xmit_mstamp: Instant,
+    /// Last wire copy was a retransmission (Karn / RACK bookkeeping).
+    pub retrans: bool,
+}
+
+impl UnackedSegment {
+    pub fn is_syn(&self) -> bool {
+        (self.flags & TcpDatagramHeader::SYN) != 0
+    }
+
+    pub fn is_fin(&self) -> bool {
+        (self.flags & TcpDatagramHeader::FIN) != 0
+    }
+
+    /// Sequence number one past the last byte this segment occupies.
+    ///
+    /// SYN and FIN each consume one sequence number even though they carry
+    /// no payload, so a control-only segment's end is simply `seq + 1`.
+    pub fn end_seq(&self) -> u32 {
+        self.seq.wrapping_add(if self.is_syn() || self.is_fin() {
+            1
+        } else {
+            self.data.len() as u32
+        })
+    }
+}
+
+/// Errors that can occur during TCP connection lifetime.
+#[derive(Debug, Copy, Clone)]
+pub enum TcpError {
+    ConnectionRefused,
+    Timeout,
+    NoRoute,
+    InvalidResponse,
+    NotConnected,
+    EOF,
+    ConnectionReset,
+}
+
+#[derive(Clone)]
+pub struct TcpControlBlock {
+    // â”€â”€ Send sequence variables (RFC 9293 §3.3.1) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub snd_una: u32,
+    pub snd_nxt: u32,
+    pub snd_wnd: u32,
+    pub snd_wl1: u32,
+    pub snd_wl2: u32,
+    pub iss: u32,
+
+    // â”€â”€ Receive sequence variables â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub rcv_nxt: u32,
+    pub rcv_wnd: u16,
+    pub irs: u32,
+
+    // â”€â”€ Connection identity â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub state: TcpState,
+    pub tuple: ConnectionTuple,
+    pub socket: Socket,
+
+    // â”€â”€ Buffers and signalling â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub receive_buffer: TcpReceiveBuffer,
+    pub send_buffer: VecDeque<u8>,
+    /// Wakes threads waiting for data or state changes.
+    pub event: Arc<Event>,
+    /// Signals active-open completion (final ACK sent or connection refused).
+    pub handshake_gate: Arc<OneshotGate>,
+
+    // â”€â”€ Timers and retransmission â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub ack_needed: bool,
+    pub ack_deadline: Option<Instant>,
+    pub unacked_segments: u8,
+    pub retransmission_queue: VecDeque<UnackedSegment>,
+    pub rto: Duration,
+
+    // RFC 6298 RTT estimators.
+    srtt: Option<Duration>,
+    rttvar: Option<Duration>,
+    rtt_m: RttMeasurementState,
+
+    pub persist_timer: Option<Instant>,
+    pub persist_backoff: Duration,
+
+    // â”€â”€ Health and keepalive â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub last_rx_time: Instant,
+    pub keepalive_deadline: Option<Instant>,
+    pub timewait_deadline: Option<Instant>,
+    pub keepalive_count: u32,
+    pub last_error: Option<TcpError>,
+
+    // â”€â”€ Flow and congestion control â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    pub nagle_enabled: bool,
+    pub last_ack_received: u32,
+    pub duplicate_ack_count: u32,
+    pub congestion_control: CongestionControl,
+    pub cwnd: u32,
+    pub ssthresh: u32,
+    pub in_fast_recovery: bool,
+
+    pub max_rcv_wnd: u32,
+    pub peer_mss: u16,
+    pub rcv_wscale: u8,
+    pub snd_wscale: u8,
+    pub wnd_scale_enabled: bool,
+
+    ts: TcpTimestampState,
+    eifel: EifelState,
+    /// RFC 5682 F-RTO â€” active only when `!ts.enabled` (see [`FrtoState`]).
+    frto: FrtoState,
+    ecn: TcpEcnState,
+    /// RFC 7661 New Congestion Window Validation (see [`NewCwvState`]).
+    cwv: NewCwvState,
+    /// RFC 3465 Appropriate Byte Counting â€” always on (see [`AbcState`]).
+    abc: AbcState,
+    /// Packet pacing (see [`PacingState`]).
+    pacing: PacingState,
+    /// RFC 2018/6675/8985 SACK + RACK + TLP (see [`SackRackState`]).
+    sack: SackRackState,
+    /// Precomputed SMSS (peer MSS â’ Timestamp overhead when enabled).
+    /// Refresh via [`TcpControlBlock::recompute_effective_mss`] after MSS/TS negotiation.
+    pub effective_mss: u32,
+}
+
+impl TcpControlBlock {
+    pub fn new(
+        iss: u32,
+        connection: ConnectionTuple,
+        socket: Socket,
+        nagle_enabled: bool,
+        cwv_enabled: bool,
+        pacing_enabled: bool,
+    ) -> Self {
+        // RFC 5681 §3.1 / RFC 6928: IW â‰ 1â€“10 SMSS; 1512 B â‰ one Ethernet SMSS.
+        const INITIAL_CWND: u32 = 1512;
+        // RFC 5681 §3.1: initial ssthresh SHOULD be set arbitrarily high
+        // (e.g. largest possible advertised window) so the connection starts
+        // in Slow Start. A value below INITIAL_CWND forces Congestion
+        // Avoidance from the first ACK (`grow_cwnd_value`: cwnd < ssthresh).
+        // 0x7fff_ffff matches the common â€śinfinite ssthreshâ€ť sentinel (Linux).
+        const INITIAL_SSTHRESH: u32 = 0x7fff_ffff;
+        Self {
+            snd_una: iss,
+            snd_nxt: iss,
+            snd_wnd: 0,
+            snd_wl1: 0,
+            snd_wl2: 0,
+            iss,
+            rcv_nxt: 0,
+            rcv_wnd: 0,
+            irs: 0,
+            state: TcpState::Closed,
+            tuple: connection,
+            socket,
+            event: Arc::new(Event::new()),
+            handshake_gate: Arc::new(OneshotGate::new()),
+            ack_needed: false,
+            ack_deadline: None,
+            unacked_segments: 0,
+            retransmission_queue: VecDeque::new(),
+            rto: Duration::from_secs(1), // RFC 6298: conservative initial RTO
+            srtt: None,
+            rttvar: None,
+            rtt_m: RttMeasurementState::new(),
+            send_buffer: VecDeque::new(),
+            persist_timer: None,
+            persist_backoff: Duration::from_millis(500),
+            last_rx_time: Instant::now(),
+            keepalive_deadline: None,
+            timewait_deadline: None,
+            keepalive_count: 0,
+            last_error: None,
+            receive_buffer: TcpReceiveBuffer::new(4096),
+            nagle_enabled,
+            last_ack_received: 0,
+            duplicate_ack_count: 0,
+            congestion_control: CongestionControl::Cubic(CubicState {
+                w_max: 0,
+                epoch_start: Instant::now(),
+                k_ns: 0,
+                last_max_cwnd: 0,
+                beta: 717, // 0.7 x 1024, per RFC 8312's recommended default
+                c: 410,    // 0.4 x 1024, per RFC 8312's recommended default
+                recover: 0,
+            }),
+            cwnd: INITIAL_CWND,
+            ssthresh: INITIAL_SSTHRESH,
+            in_fast_recovery: false,
+            max_rcv_wnd: 0,
+            peer_mss: DEFAULT_MSS,
+            rcv_wscale: 0,
+            snd_wscale: 0,
+            wnd_scale_enabled: false,
+            ts: TcpTimestampState::new(),
+            eifel: EifelState::new(),
+            frto: FrtoState::new(),
+            ecn: TcpEcnState::new(),
+            cwv: NewCwvState::new(cwv_enabled, INITIAL_CWND),
+            abc: AbcState::new(),
+            pacing: PacingState::new(pacing_enabled),
+            sack: SackRackState::new(),
+            effective_mss: MSS as u32,
+        }
+    }
+
+    /// RFC 6691 / RFC 7323: SMSS = min(MSS, peer_mss) â’ 12 if Timestamps on.
+    pub fn recompute_effective_mss(&mut self) {
+        let mut mss = core::cmp::min(MSS, self.peer_mss as usize);
+        if self.ts.enabled {
+            mss = mss.saturating_sub(TCP_TS_OPTION_OVERHEAD);
+        }
+        self.effective_mss = mss.max(1) as u32;
+    }
+
+    /// Free receive-buffer space capped by `max_rcv_wnd`.
+    pub fn effective_rcv_wnd(&self) -> u32 {
+        self.receive_buffer
+            .free_space()
+            .min(self.max_rcv_wnd as usize) as u32
+    }
+
+    /// Refreshes `rcv_wnd` from the buffer and the `max_rcv_wnd` cap.
+    pub fn update_rcv_wnd_from_buffer(&mut self) {
+        self.rcv_wnd = self.effective_rcv_wnd().min(u16::MAX as u32) as u16;
+    }
+
+    /// Scaled window value to place in the TCP header.
+    pub fn advertised_rcv_wnd_u16(&self) -> u16 {
+        let wnd = self.rcv_wnd as u32;
+        if self.wnd_scale_enabled && self.rcv_wscale > 0 {
+            (wnd >> self.rcv_wscale).min(65535) as u16
+        } else {
+            wnd.min(65535) as u16
+        }
+    }
+
+    /// Converts a wire-format window advertisement from the peer into an
+    /// actual byte count.
+    ///
+    /// RFC 7323 §2.2: once window scaling has been negotiated, the 16-bit
+    /// window field in every segment from this peer is a right-shifted
+    /// value; the real window is `advertised << shift`. Before scaling is
+    /// negotiated the field is used at face value.
+    pub fn scale_peer_window(&self, wire_wnd: u16) -> u32 {
+        if self.wnd_scale_enabled && self.snd_wscale > 0 {
+            (wire_wnd as u32) << self.snd_wscale
+        } else {
+            wire_wnd as u32
+        }
+    }
+
+    /// RFC 9293 §3.10.7.4 â€” update SND.WND only from a *newer* advertisement.
+    ///
+    /// ```text
+    ///   if SND.WL1 < SEG.SEQ
+    ///      or (SND.WL1 == SEG.SEQ and SND.WL2 <= SEG.ACK):
+    ///        SND.WND â† SEG.WND
+    ///        SND.WL1 â† SEG.SEQ
+    ///        SND.WL2 â† SEG.ACK
+    /// ```
+    ///
+    /// Without this gate, a reordered older segment can shrink (or inflate)
+    /// the send window after a newer update already applied.
+    pub fn maybe_update_send_window(&mut self, seg_seq: u32, seg_ack: u32, wire_wnd: u16) {
+        let seq_newer = (seg_seq.wrapping_sub(self.snd_wl1) as i32) > 0;
+        let ack_newer_same_seq =
+            self.snd_wl1 == seg_seq && (seg_ack.wrapping_sub(self.snd_wl2) as i32) >= 0;
+        if seq_newer || ack_newer_same_seq {
+            self.snd_wnd = self.scale_peer_window(wire_wnd);
+            self.snd_wl1 = seg_seq;
+            self.snd_wl2 = seg_ack;
+        }
+    }
+
+    /// RFC 9293: ACK is acceptable when SND.UNA < ACK <= SND.NXT.
+    pub fn is_acceptable_ack(&self, ack: u32) -> bool {
+        let distance = ack.wrapping_sub(self.snd_una);
+        let window = self.snd_nxt.wrapping_sub(self.snd_una);
+        distance <= window
+    }
+
+    /// Checks whether a single sequence number falls inside the receive window.
+    ///
+    /// Handles the wrap-around case per RFC 9293 §3.10.7.4.
+    pub fn is_in_receive_window(&self, seq: u32) -> bool {
+        let end = self.rcv_nxt.wrapping_add(self.rcv_wnd as u32);
+        if self.rcv_nxt <= end {
+            seq >= self.rcv_nxt && seq < end
+        } else {
+            seq >= self.rcv_nxt || seq < end
+        }
+    }
+
+    /// Checks whether the first or last byte of a segment is inside the receive window.
+    pub fn is_segment_acceptable(&self, seq: u32, len: u32) -> bool {
+        if len == 0 {
+            return if self.rcv_wnd == 0 {
+                seq == self.rcv_nxt
+            } else {
+                self.is_in_receive_window(seq)
+            };
+        }
+        let seq_end = seq.wrapping_add(len - 1);
+        self.is_in_receive_window(seq) || self.is_in_receive_window(seq_end)
+    }
+
+    /// Returns `true` when `n` additional bytes fit inside the remote receive window.
+    pub fn can_send(&self, n: u32) -> bool {
+        let in_flight = self.snd_nxt.wrapping_sub(self.snd_una);
+        in_flight
+            .checked_add(n)
+            .map_or(false, |t| t <= self.snd_wnd)
+    }
+
+    /// Advances `rcv_nxt` past the FIN and transitions the state machine.
+    ///
+    /// State transitions:
+    ///   Established â†’ CloseWait  (remote-initiated close)
+    ///   FinWait1    â†’ Closing    (simultaneous close)
+    ///   FinWait2    â†’ TimeWait   (active close completion)
+    pub fn handle_fin_flag(&mut self) {
+        self.rcv_nxt = self.rcv_nxt.wrapping_add(1);
+        self.ack_needed = true;
+
+        match self.state {
+            TcpState::Established => {
+                self.state = TcpState::CloseWait;
+                self.event.notify();
+                log::trace!("TCP State: Established -> CloseWait (Remote FIN)");
+            }
+            TcpState::FinWait1 => {
+                self.state = TcpState::Closing;
+                log::trace!("TCP State: FinWait1 -> Closing (Simultaneous Close)");
+            }
+            TcpState::FinWait2 => {
+                self.state = TcpState::TimeWait;
+                self.timewait_deadline = Some(Instant::now() + Duration::from_secs(120));
+                log::trace!("TCP State: FinWait2 -> TimeWait; 2MSL timer armed");
+            }
+            _ => {
+                log::trace!("TCP: FIN in state {:?}, ignoring", self.state);
+            }
+        }
+    }
+
+    /// Bytes currently in flight: `SND.NXT - SND.UNA`.
+    fn flight_size_bytes(&self) -> u32 {
+        self.snd_nxt.wrapping_sub(self.snd_una)
+    }
+
+    /// Captures CC / RTT state for CSV dump to the host.
+    pub fn cc_snapshot(&self) -> TcpCcSnapshot {
+        let (algo, w_max, k_ns) = match &self.congestion_control {
+            CongestionControl::Reno(_) => (0, 0, 0),
+            CongestionControl::Cubic(c) => (1, c.w_max, c.k_ns),
+        };
+
+        TcpCcSnapshot {
+            t_ns: kernel_ref().clock().monotonic_ns(),
+            srtt_us: self.srtt.map(|d| d.as_nanos() / 1000).unwrap_or(0),
+            rttvar_us: self.rttvar.map(|d| d.as_nanos() / 1000).unwrap_or(0),
+            rto_us: self.rto.as_nanos() / 1000,
+            cwnd: self.cwnd,
+            ssthresh: self.ssthresh,
+            snd_wnd: self.snd_wnd,
+            flight: self.flight_size_bytes(),
+            algo,
+            w_max,
+            k_ns,
+            in_fast_recovery: self.in_fast_recovery,
+            dupacks: self.duplicate_ack_count,
+            ts_enabled: self.ts.enabled as u8,
+            rtt_probe_us: self
+                .rtt_m
+                .last_probe_sample
+                .map(|d| d.as_nanos() / 1000)
+                .unwrap_or(0),
+            rtt_ts_us: self
+                .rtt_m
+                .last_ts_sample
+                .map(|d| d.as_nanos() / 1000)
+                .unwrap_or(0),
+            eifel_spurious: self.eifel.spurious_count,
+            eifel_pipe_prev: self.eifel.pipe_prev.unwrap_or(0),
+            ecn_enabled: self.ecn.enabled as u8,
+            ecn_ce_seen: self.ecn.ce_seen,
+            ecn_ece_tx: self.ecn.ece_tx,
+            ecn_ece_rx: self.ecn.ece_rx,
+            ecn_md: self.ecn.ecn_md,
+            ecn_cwr_tx: self.ecn.cwr_tx,
+            cwv_enabled: self.cwv.enabled as u8,
+            cwv_validated: self.cwv.validated as u8,
+            cwv_pipe_max: self.cwv.pipe_max,
+            cwnd_no_cwv: self.cwv.cwnd_raw,
+            cwv_no_increase: self.cwv.no_increase,
+            cwv_idle_reduce: self.cwv.idle_reduce,
+            cwv_applim_reduce: self.cwv.applim_reduce,
+            abc_ca_accum: self.abc.ca_accum,
+            abc_bytes_credited: self.abc.bytes_credited,
+            abc_ss_capped: self.abc.ss_capped,
+            abc_ca_increments: self.abc.ca_increments,
+            frto_phase: self.frto.phase as u8,
+            frto_spurious: self.frto.spurious_count,
+            frto_declared_loss: self.frto.declared_loss_count,
+            pacing_enabled: self.pacing.enabled as u8,
+            pacing_rate_bps: self.pacing.rate_bps,
+            pacing_gap_us: self.pacing.last_gap.as_nanos() / 1000,
+            pacing_held: self.pacing.held_count,
+            pacing_paced: self.pacing.paced_count,
+            sack_enabled: self.sack.enabled as u8,
+            sack_blocks_rx: self.sack.blocks_rx,
+            sack_blocks_tx: self.sack.blocks_tx,
+            sack_islost: self.sack.islost_marks,
+            sack_rack: self.sack.rack_marks,
+            sack_tlp: self.sack.tlp_probes,
+            sack_dsack_undo: self.sack.dsack_undo,
+            sack_rexmit_holes: self.sack.rexmit_holes,
+            sack_ooo_ranges: self.sack.rx_range_len,
+        }
+    }
+}
+
+// â”€â”€ TCP header â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// TCP segment header as defined in RFC 9293 §3.1.
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |          Source Port          |       Destination Port        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                        Sequence Number                        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |                    Acknowledgment Number                      |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |  Data |       |U|A|P|R|S|F|                                   |
+/// | Offset|  Res  |R|C|S|S|Y|I|            Window                 |
+/// |       |       |G|K|H|T|N|N|                                   |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// |           Checksum            |         Urgent Pointer        |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+#[repr(C, packed)]
+#[derive(FromBytes, IntoBytes, Immutable, KnownLayout, Debug, Copy, Clone)]
+pub struct TcpDatagramHeader {
+    pub source_port: U16,
+    pub dest_port: U16,
+    pub sequence_number: U32,
+    pub ack_number: U32,
+    pub offset_res: u8,
+    pub flags: u8,
+    pub window_size: U16,
+    pub checksum: U16,
+    pub urgent_pointer: U16,
+}
+
+impl TcpDatagramHeader {
+    pub const FIN: u8 = 0b0000_0001;
+    pub const SYN: u8 = 0b0000_0010;
+    pub const RST: u8 = 0b0000_0100;
+    pub const PSH: u8 = 0b0000_1000;
+    pub const ACK: u8 = 0b0001_0000;
+    pub const URG: u8 = 0b0010_0000;
+    /// RFC 3168 §6.1: ECN-Echo â€” receiver saw CE (or SYN-ACK ECN OK).
+    pub const ECE: u8 = 0b0100_0000;
+    /// RFC 3168 §6.1: Congestion Window Reduced â€” sender reacted to ECE.
+    pub const CWR: u8 = 0b1000_0000;
+
+    /// Builds a header from the current TCB state (SEQ=SND.NXT, ACK=RCV.NXT).
+    pub fn new(tcb: &TcpControlBlock) -> Self {
+        let mut h = Self {
+            source_port: U16::from(tcb.tuple.local_port),
+            dest_port: U16::from(tcb.tuple.remote_port),
+            sequence_number: tcb.snd_nxt.into(),
+            ack_number: tcb.rcv_nxt.into(),
+            offset_res: 0,
+            flags: 0,
+            window_size: U16::from(tcb.advertised_rcv_wnd_u16()),
+            checksum: 0.into(),
+            urgent_pointer: 0.into(),
+        };
+        h.set_offset(5);
+        h
+    }
+
+    /// Builds a stateless header (for RST, keepalive, etc.) without a full TCB.
+    pub fn new_raw(connection: &ConnectionTuple, rcv_nxt: u32, rcv_wnd: u16, flags: u8) -> Self {
+        let mut h = Self {
+            source_port: U16::from(connection.local_port),
+            dest_port: U16::from(connection.remote_port),
+            sequence_number: U32::from(0),
+            ack_number: U32::from(rcv_nxt),
+            offset_res: 0,
+            flags,
+            window_size: U16::from(rcv_wnd),
+            checksum: U16::from(0),
+            urgent_pointer: U16::from(0),
+        };
+        h.set_offset(5);
+        h
+    }
+
+    pub fn set_sequence_number(&mut self, v: u32) {
+        self.sequence_number = U32::from(v);
+    }
+
+    pub fn set_acknowledgement_number(&mut self, v: u32) {
+        self.ack_number = U32::from(v);
+    }
+
+    /// Sets the Data Offset field (header length in 32-bit words, must be 5..=15).
+    pub fn set_offset(&mut self, offset: u8) {
+        assert!(offset >= 5 && offset <= 15);
+        self.offset_res = (self.offset_res & 0x0F) | (offset << 4);
+    }
+
+    pub fn get_offset(&self) -> u8 {
+        (self.offset_res >> 4) & 0x0F
+    }
+
+    /// Header length in bytes (Data Offset Ă— 4).
+    pub fn header_len_bytes(&self) -> usize {
+        self.get_offset() as usize * 4
+    }
+
+    pub fn set_flag(&mut self, mask: u8, value: bool) {
+        if value {
+            self.flags |= mask;
+        } else {
+            self.flags &= !mask;
+        }
+    }
+
+    pub fn get_flag(&self, mask: u8) -> bool {
+        (self.flags & mask) != 0
+    }
+
+    pub fn set_flags(&mut self, flags: u8) {
+        self.flags = flags;
+    }
+
+    pub fn is_syn(&self) -> bool {
+        self.get_flag(Self::SYN)
+    }
+
+    pub fn is_ack(&self) -> bool {
+        self.get_flag(Self::ACK)
+    }
+
+    pub fn is_fin(&self) -> bool {
+        self.get_flag(Self::FIN)
+    }
+
+    pub fn is_rst(&self) -> bool {
+        self.get_flag(Self::RST)
+    }
+}
+
+// â”€â”€ TCP options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// â”€â”€ Connection 4-tuple â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// Unique identifier for a TCP connection (RFC 9293).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ConnectionTuple {
+    pub local_ip: Ipv4Addr,
+    pub local_port: u16,
+    pub remote_ip: Ipv4Addr,
+    pub remote_port: u16,
+}
+
+impl ConnectionTuple {
+    pub fn from_socket(socket: &Socket) -> Self {
+        Self {
+            local_ip: socket.local_address(),
+            local_port: socket.local_port(),
+            remote_ip: socket.remote_address(),
+            remote_port: socket.remote_port(),
+        }
+    }
+}
+
+// â”€â”€ Socket options â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+/// Per-listener socket configuration, applied to a [`TcpControlBlock`] when a
+/// passive-open connection is accepted (see `process_passive_syn`). Active
+/// opens take the same knobs as explicit arguments to
+/// [`TcpDriver::connect`] instead, since there's no listener to hold them.
+#[derive(Clone, Copy, Debug)]
+pub struct TcpSocketOpts {
+    pub nagle_enabled: bool,
+    pub recv_buf_size: usize,
+    pub rcv_wscale: u8,
+    /// RFC 7661 New CWV â€” set false to disable validation (cwnd grows like classic TCP).
+    pub cwv_enabled: bool,
+    /// Spread new-data TX over ~1 RTT (see [`pacing::PacingState`]).
+    pub pacing_enabled: bool,
+}
+
+impl Default for TcpSocketOpts {
+    fn default() -> Self {
+        Self {
+            nagle_enabled: true,
+            recv_buf_size: 4096,
+            rcv_wscale: DEFAULT_RCV_WSCALE,
+            cwv_enabled: true,
+            pacing_enabled: true,
+        }
+    }
+}
+
+// â”€â”€ Driver â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+pub struct TcpDriver {
+    connections: IrqGuardedRwLock<HashMap<ConnectionTuple, Arc<IrqGuardedRwLock<TcpControlBlock>>>>,
+    pub(crate) socket_table: IrqGuardedRwLock<TcpSocketTable>,
+}
+
+/// Maximum segment size we ever put on the wire, chosen for a standard
+/// 1500-byte Ethernet MTU: 1500 - 20 (IPv4 header) - 20 (TCP header).
+const MSS: usize = 1460;
+
+/// MSS we advertise to peers in our own SYN / SYN-ACK options, before
+/// accounting for whatever the peer advertises back. Same value as `MSS`
+/// since we don't currently do path-MTU discovery.
+const DEFAULT_MSS: u16 = 1460;
+
+/// Default receive window scale factor we offer (RFC 7323). A shift of 7
+/// lets a 16-bit window field describe up to 65535 << 7 â‰ 8 MiB of buffer
+/// space, which is comfortably above `TcpSocketOpts::recv_buf_size`'s
+/// default.
+const DEFAULT_RCV_WSCALE: u8 = 7;
+
+impl TcpDriver {
+    pub fn new() -> Self {
+        Self {
+            connections: IrqGuardedRwLock::new(HashMap::new()),
+            socket_table: IrqGuardedRwLock::new(TcpSocketTable::new()),
+        }
+    }
+
+    pub fn initialize(&self) {
+        kernel_ref().spawn_kernel_thread(tcp_worker, 0, 7).unwrap();
+    }
+
+    /// Aborts a connection after an ICMP hard error (RFC 1122 §3.2.2.4).
+    ///
+    /// Clears the retransmission queue so the timer thread cannot send more
+    /// SYNs, and wakes anyone blocked in `connect()` / `receive_sync()`.
+    pub fn abort_connection(&self, tuple: ConnectionTuple, error: TcpError) {
+        let Some(tcb_arc) = self.connections.read().get(&tuple).cloned() else {
+            return;
+        };
+
+        let mut tcb = tcb_arc.write();
+        if tcb.state == TcpState::Closed {
+            return;
+        }
+
+        let state = tcb.state;
+        tcb.state = TcpState::Closed;
+        tcb.last_error = Some(error);
+        tcb.retransmission_queue.clear();
+        tcb.rtt_m.probe = None;
+        tcb.persist_timer = None;
+        Self::eifel_clear_pending(&mut tcb);
+        tcb.frto.clear();
+        tcb.event.notify();
+        drop(tcb);
+
+        log::info!("TCP: abort {:?} state={:?} err={:?}", tuple, state, error);
+    }
+
+    /// Active-open handshake (RFC 9293 §3.5) â€” fully owned by the TCP driver.
+    ///
+    /// Sends SYN; the SYN-ACK is handled by [`RxProcessThread`], which calls
+    /// into [`TcpDriver::process_syn_ack`] and sends the final ACK right
+    /// there, inline. This call just blocks until that's visible as
+    /// `TcpState::Established`, or the handshake fails/times out.
+    /// Pass `local_port == 0` for an ephemeral port.
+    pub fn connect(
+        &self,
+        nic: NetworkInterfaceId,
+        local_ip: Ipv4Addr,
+        local_port: u16,
+        remote_ip: Ipv4Addr,
+        remote_port: u16,
+        nagle_enabled: bool,
+        max_rcv_wnd: u32,
+        rcv_wscale: u8,
+        cwv_enabled: bool,
+        pacing_enabled: bool,
+    ) -> Result<Arc<IrqGuardedRwLock<TcpControlBlock>>, TcpError> {
+        let local_port = if local_port == 0 {
+            Self::alloc_ephemeral_port()
+        } else {
+            local_port
+        };
+
+        let socket = Socket::new(local_ip, local_port, remote_ip, remote_port, nic);
+        let tuple = ConnectionTuple::from_socket(&socket);
+        let iss = RdRand::new().unwrap().get_u32().unwrap();
+
+        log::info!(
+            "TCP: connect {}:{} -> {}:{}",
+            local_ip,
+            local_port,
+            remote_ip,
+            remote_port
+        );
+
+        let mut tcb = TcpControlBlock::new(
+            iss,
+            tuple,
+            socket.clone(),
+            nagle_enabled,
+            cwv_enabled,
+            pacing_enabled,
+        );
+        let buf_cap = if max_rcv_wnd > 0 {
+            max_rcv_wnd as usize
+        } else {
+            tcb.receive_buffer.capacity()
+        };
+        tcb.receive_buffer = TcpReceiveBuffer::new(buf_cap);
+        tcb.max_rcv_wnd = buf_cap as u32;
+        tcb.rcv_wscale = rcv_wscale;
+        tcb.wnd_scale_enabled = true;
+        tcb.update_rcv_wnd_from_buffer();
+        tcb.state = TcpState::SynSent;
+        tcb.snd_nxt = iss.wrapping_add(1); // SYN consumes one sequence number
+
+        let tcb_arc = Arc::new(IrqGuardedRwLock::new(tcb));
+        self.connections.write().insert(tuple, tcb_arc.clone());
+
+        // Build and queue SYN segment.
+        // RFC 3168 §6.1.1: offer ECN by setting both ECE and CWR on SYN.
+        // SYN itself must remain Not-ECT (no ECT in IP TOS) â€” §6.1.1.
+        let mut hdr = TcpDatagramHeader::new(&tcb_arc.read());
+        hdr.set_sequence_number(iss);
+        hdr.set_acknowledgement_number(0);
+        hdr.set_flag(TcpDatagramHeader::SYN, true);
+        hdr.set_flag(TcpDatagramHeader::ECE, true);
+        hdr.set_flag(TcpDatagramHeader::CWR, true);
+
+        let mut opt_writer = TcpOptionsWriter::new();
+        opt_writer.push_mss(DEFAULT_MSS);
+        opt_writer.push_window_scale(rcv_wscale);
+        opt_writer.push_sack_permitted();
+        let syn_ts = Self::tcp_ts_now(tcb_arc.read().ts.offset);
+        opt_writer.push_timestamp(syn_ts, 0);
+        let syn_options = opt_writer.finish();
+
+        {
+            let mut t = tcb_arc.write();
+            t.retransmission_queue.push_back(UnackedSegment {
+                seq: iss,
+                data: Vec::new(),
+                flags: hdr.flags,
+                send_time: Instant::now(),
+                retries: 0,
+                first_tsval: Some(syn_ts),
+                retransmit_tsval: None,
+                sacked: false,
+                lost: false,
+                xmit_mstamp: Instant::now(),
+                retrans: false,
+            });
+            t.rtt_m.probe = Some(RttProbe {
+                seq: iss,
+                end: iss.wrapping_add(1),
+                sent_at: Instant::now(),
+                tsval: Some(syn_ts),
+            });
+            t.ts.last_tx_tsval = syn_ts;
+        }
+
+        if !self.net_send_tcp_datagram_with_options(socket, &mut hdr, syn_options, &[], 0) {
+            self.connections.write().remove(&tuple);
+            return Err(TcpError::NoRoute);
+        }
+
+        log::info!("TCP: SYN sent {:?}, awaiting SYN-ACK", tuple);
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        tcb_arc.read().event.clear_pending();
+
+        loop {
+            let (state, last_error) = {
+                let t = tcb_arc.read();
+                (t.state, t.last_error)
+            };
+
+            if state == TcpState::Established {
+                log::info!("TCP: connect complete {:?}", tuple);
+                return Ok(tcb_arc);
+            }
+
+            if state == TcpState::Closed {
+                self.connections.write().remove(&tuple);
+                return Err(last_error.unwrap_or(TcpError::ConnectionRefused));
+            }
+
+            if Instant::now() >= deadline {
+                self.connections.write().remove(&tuple);
+                return Err(TcpError::Timeout);
+            }
+
+            // Wait for RxProcessThread to deliver the SYN-ACK and run
+            // process_syn_ack, which sends the final ACK itself and flips
+            // the state to Established.
+            park_current_thread();
+        }
+    }
+
+    fn alloc_ephemeral_port() -> u16 {
+        let random_val: u16 = RdRand::new().and_then(|r| r.get_u16()).unwrap_or(0);
+        let base: u16 = 49152;
+        let range: u16 = 65535 - 49152 + 1;
+        base + (random_val % range)
+    }
+
+    /// Blocking receive into `target`. Returns `Ok(0)` on EOF.
+    ///
+    /// Lock discipline: the TCB write lock is held only long enough to drain
+    /// the buffer and update the advertised window, and is dropped before
+    /// `park_current_thread` / the ACK send. `IrqGuardedRwLock` disables
+    /// interrupts for the duration of the guard, so the RX path can't run
+    /// concurrently with the buffer drain; the ACK send (which touches the
+    /// NIC) always happens with the lock released and interrupts enabled.
+    pub fn receive_sync(
+        &self,
+        tcb: Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        target: &mut [u8],
+    ) -> Result<usize, TcpError> {
+        loop {
+            let (read_bytes, terminal, err) = {
+                let mut g = tcb.write();
+
+                if let Some(e) = g.last_error {
+                    (0, true, Some(e))
+                } else {
+                    let n = g.receive_buffer.read(target);
+                    if n > 0 {
+                        g.ack_needed = true;
+                        g.update_rcv_wnd_from_buffer();
+                        (n, false, None)
+                    } else {
+                        // No data â€” check if the remote end is done sending.
+                        let closed = matches!(
+                            g.state,
+                            TcpState::CloseWait
+                                | TcpState::Closed
+                                | TcpState::LastAck
+                                | TcpState::TimeWait
+                        );
+                        (0, closed, None)
+                    }
+                }
+            };
+
+            if let Some(e) = err {
+                return Err(e);
+            }
+            if terminal && read_bytes == 0 {
+                return Ok(0); // EOF
+            }
+            if read_bytes > 0 {
+                // Send ACK / window update from thread context (interrupts enabled).
+                self.send_immediate_ack_unlocked(&tcb);
+                return Ok(read_bytes);
+            }
+
+            // Buffer empty, connection still open â€” sleep until data arrives.
+            let event = tcb.read().event.clone();
+            block_on_event(&event);
+        }
+    }
+
+    // â”€â”€ Network send helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+
+    /// RFC 7323 TSval clock: monotonic ms + per-connection random offset.
+    ///
+    /// The offset hides host uptime from passive observers. RTT via
+    /// `now.wrapping_sub(TSecr)` is unchanged because both samples share
+    /// the same offset.
+    fn tcp_ts_now(offset: u32) -> u32 {
+        let ms = (kernel_ref().clock().monotonic_ns() / 1_000_000) as u32;
+        ms.wrapping_add(offset)
+    }
+
+    fn find_timestamp(options: &[u8]) -> Option<(u32, u32)> {
+        for opt in TcpOptionsParser::new(options) {
+            if let TcpOption::Timestamp { tsval, tsecr } = opt {
+                return Some((tsval, tsecr));
+            }
+        }
+        None
+    }
+
+    /// Build options for non-SYN TX: Timestamps (if negotiated) followed by
+    /// SACK blocks (RFC 2018) describing our current receive-side scoreboard.
+    fn established_outgoing_options(tcb: &mut TcpControlBlock) -> (Vec<u8>, Option<u32>) {
+        let mut w = TcpOptionsWriter::new();
+        let mut tsval_out = None;
+
+        if tcb.ts.enabled {
+            let tsval = Self::tcp_ts_now(tcb.ts.offset);
+            tcb.ts.last_tx_tsval = tsval;
+            w.push_timestamp(tsval, tcb.ts.ts_recent);
+            tsval_out = Some(tsval);
+        }
+
+        // RFC 2018 §3: report up to 4 SACK blocks, first one being the block
+        // containing the most recently received out-of-order segment (so a
+        // sender that can only keep a few blocks still learns about fresh
+        // data first). The remaining blocks fill in whatever budget is left
+        // in the 40-byte options area after Timestamps.
+        if tcb.sack.enabled && tcb.sack.rx_range_len > 0 {
+            let mut ordered = [SackBlock::default(); SACK_RX_RANGES_MAX];
+            let mut n = 0usize;
+            if let Some(recent) = tcb.sack.rx_recent {
+                ordered[0] = recent;
+                n = 1;
+            }
+            for i in 0..tcb.sack.rx_range_len as usize {
+                let b = tcb.sack.rx_ranges[i];
+                if Some(b) != tcb.sack.rx_recent {
+                    ordered[n] = b;
+                    n += 1;
+                }
+            }
+            let budget = TCP_OPTS_MAX.saturating_sub(w.written());
+            let written_before = w.written();
+            w.push_sack_limited(&ordered[..n], budget);
+            if w.written() != written_before {
+                tcb.sack.blocks_tx = tcb.sack.blocks_tx.saturating_add(1);
+            }
+        }
+
+        (w.finish().to_vec(), tsval_out)
+    }
+
+    // â”€â”€ RFC 2018 SACK + RFC 6675 loss recovery + RFC 8985 RACK/TLP â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    //
+    // These helpers are split along the same receiver/sender line as
+    // [`SackRackState`] itself:
+    //   - `sack_rx_*`  : receiver scoreboard (what *we* tell the peer).
+    //   - `sack_tx_*`, `sack_mark_lost`, `sack_bytes_above`, `sack_pipe_bytes`,
+    //     `sack_has_lost`, `sack_dsack_undo`, `sack_enter_recovery` : sender
+    //     scoreboard (what the peer told *us* via its SACK blocks).
+    //   - `rack_*`     : RFC 8985 time-based loss detection layered on top
+    //     of the sender scoreboard.
+    //   - `tlp_*`      : RFC 8985 §7 Tail Loss Probe.
+
+    /// Extracts up to 4 SACK blocks (RFC 2018 §3 caps a single option at 4
+    /// blocks given the 40-byte options budget) from a segment's options.
+    ///
+    /// Degenerate blocks (`right` not strictly after `left` in sequence
+    /// space) are dropped â€” they can't come from a spec-compliant peer, but
+    /// a malformed/hostile one shouldn't be able to wedge bogus entries into
+    /// our scoreboard.
+    fn parse_sack_blocks(options: &[u8]) -> ([SackBlock; 4], usize) {
+        let mut blocks = [SackBlock::default(); 4];
+        let mut n = 0usize;
+        for opt in TcpOptionsParser::new(options) {
+            if let TcpOption::Sack(data) = opt {
+                for chunk in data.chunks_exact(8) {
+                    if n >= blocks.len() {
+                        break;
+                    }
+                    let left = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let right = u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]);
+                    if (right.wrapping_sub(left) as i32) > 0 {
+                        blocks[n] = SackBlock { left, right };
+                        n += 1;
+                    }
+                }
+                // RFC 2018 §3: at most one SACK option per segment.
+                break;
+            }
+        }
+        (blocks, n)
+    }
+
+    /// Receiver side: absorb an out-of-order segment when SACK is enabled.
+    ///
+    /// Writes the payload directly into its final position in the receive
+    /// window (`TcpReceiveBuffer::write_at` â€” no second `Vec<u8>` per hole)
+    /// and records the byte range on the scoreboard so it can be (a)
+    /// advertised in our next outgoing SACK option and (b) folded into
+    /// RCV.NXT automatically by [`Self::sack_rx_advance_from_scoreboard`]
+    /// once the preceding hole is filled.
+    fn sack_rx_ooo(tcb: &mut TcpControlBlock, seq: u32, payload: &[u8]) {
+        let rcv_nxt = tcb.rcv_nxt;
+        let n = tcb.receive_buffer.write_at(rcv_nxt, seq, payload);
+        if n == 0 {
+            // Buffer full, or the segment fell entirely outside the window
+            // we can currently hold â€” nothing to record.
+            return;
+        }
+        let end = seq.wrapping_add(n as u32);
+        Self::sack_rx_insert_range(tcb, seq, end);
+    }
+
+    /// Inserts `[left, right)` into the receiver scoreboard, merging with
+    /// any existing range it overlaps or touches so the scoreboard never
+    /// carries two blocks describing adjacent data (RFC 2018's blocks are
+    /// meant to be maximal contiguous runs).
+    ///
+    /// The scoreboard is a small fixed array (`SACK_RX_RANGES_MAX`), so
+    /// merging is a linear scan-and-compact rather than a sorted structure â€”
+    /// perfectly fine at this size and it keeps the receiver path
+    /// allocation-free.
+    fn sack_rx_insert_range(tcb: &mut TcpControlBlock, left: u32, right: u32) {
+        let mut merged = SackBlock { left, right };
+
+        let mut i = 0usize;
+        while i < tcb.sack.rx_range_len as usize {
+            let b = tcb.sack.rx_ranges[i];
+            // Overlaps or is exactly adjacent (touching edges merge too, so
+            // a hole-filling segment coalesces with both neighbours in one
+            // pass instead of leaving a zero-length gap between blocks).
+            let touches = (merged.left.wrapping_sub(b.right) as i32) <= 0
+                && (b.left.wrapping_sub(merged.right) as i32) <= 0;
+            if touches {
+                if (b.left.wrapping_sub(merged.left) as i32) < 0 {
+                    merged.left = b.left;
+                }
+                if (b.right.wrapping_sub(merged.right) as i32) > 0 {
+                    merged.right = b.right;
+                }
+                let last = tcb.sack.rx_range_len as usize - 1;
+                tcb.sack.rx_ranges[i] = tcb.sack.rx_ranges[last];
+                tcb.sack.rx_ranges[last] = SackBlock::default();
+                tcb.sack.rx_range_len -= 1;
+                // Re-scan from the same index: the block that just moved
+                // into slot `i` might also touch `merged`.
+                continue;
+            }
+            i += 1;
+        }
+
+        if (tcb.sack.rx_range_len as usize) >= SACK_RX_RANGES_MAX {
+            // Scoreboard full. Losing a range here only costs us reporting
+            // it in SACK options a little later (or not at all until it's
+            // reachable via `advance_contig`); it does not corrupt data
+            // already safely written into the receive buffer.
+            log::trace!(
+                "TCP SACK: rx scoreboard full ({} ranges), dropping [{}, {})",
+                SACK_RX_RANGES_MAX,
+                merged.left,
+                merged.right
+            );
+            return;
+        }
+        tcb.sack.rx_ranges[tcb.sack.rx_range_len as usize] = merged;
+        tcb.sack.rx_range_len += 1;
+        tcb.sack.rx_recent = Some(merged);
+    }
+
+    /// After RCV.NXT advances (in-order write, or app-visible append),
+    /// repeatedly folds any scoreboard range that now starts exactly at the
+    /// new RCV.NXT into the contiguous, app-readable prefix.
+    ///
+    /// No payload is copied here â€” the bytes are already sitting at `head`
+    /// in the ring buffer from the earlier `write_at`; `advance_contig` just
+    /// widens the readable window over them.
+    fn sack_rx_advance_from_scoreboard(tcb: &mut TcpControlBlock) {
+        loop {
+            let mut folded = false;
+            for i in 0..tcb.sack.rx_range_len as usize {
+                let b = tcb.sack.rx_ranges[i];
+                if b.left != tcb.rcv_nxt {
+                    continue;
+                }
+                let n = b.len();
+                tcb.receive_buffer.advance_contig(n as usize);
+                tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(n);
+
+                let last = tcb.sack.rx_range_len as usize - 1;
+                tcb.sack.rx_ranges[i] = tcb.sack.rx_ranges[last];
+                tcb.sack.rx_ranges[last] = SackBlock::default();
+                tcb.sack.rx_range_len -= 1;
+                if tcb.sack.rx_recent == Some(b) {
+                    tcb.sack.rx_recent = None;
+                }
+                folded = true;
+                break; // array mutated â€” restart the scan
+            }
+            if !folded {
+                break;
+            }
+        }
+    }
+
+    /// Sender side: fold incoming SACK blocks (RFC 2018) from the peer's ACK
+    /// into our retransmission queue, marking every unacked segment they
+    /// fully cover as `sacked`.
+    ///
+    /// Also implements RFC 2883 DSACK detection: a block that lies entirely
+    /// at or below the cumulative ACK can't be describing a hole (the
+    /// cumulative ACK already covers that data); it's the peer reporting a
+    /// duplicate â€” either our retransmit arrived after the original after
+    /// all (spurious retransmit) or a network duplicate. Either way it's
+    /// evidence *against* loss, so it's routed to `sack_dsack_undo` instead
+    /// of the normal hole-marking loop.
+    fn sack_tx_apply(tcb: &mut TcpControlBlock, ack: u32, blocks: &[SackBlock]) {
+        if blocks.is_empty() {
+            return;
+        }
+        tcb.sack.blocks_rx = tcb.sack.blocks_rx.saturating_add(blocks.len() as u32);
+
+        for &b in blocks {
+            let is_dsack = (b.right.wrapping_sub(ack) as i32) <= 0;
+            if is_dsack {
+                tcb.sack.dsack_seen = tcb.sack.dsack_seen.saturating_add(1);
+                Self::sack_dsack_undo(tcb, b);
+                continue;
+            }
+
+            for seg in tcb.retransmission_queue.iter_mut() {
+                if seg.sacked {
+                    continue;
+                }
+                if b.covers(seg.seq, seg.end_seq()) {
+                    seg.sacked = true;
+                    // Newly-confirmed-delivered data can't simultaneously be
+                    // "lost"; RFC 6675's IsLost is about data *not yet*
+                    // reported, so clear any earlier lost mark.
+                    seg.lost = false;
+                    if (b.right.wrapping_sub(tcb.sack.high_sacked) as i32) > 0 {
+                        tcb.sack.high_sacked = b.right;
+                    }
+                }
+            }
+        }
+    }
+
+    /// RFC 2883 §4 DSACK undo: a DSACK is strong evidence that a recovery
+    /// episode reacted to reordering rather than real loss (or that our
+    /// retransmit itself was the spurious one), so reverse the congestion
+    /// response for that episode if we're still holding its pre-MD
+    /// snapshot (`undo_pending`, set by [`Self::sack_enter_recovery`]).
+    ///
+    /// Also widens the RACK reordering window for a few rounds: the same
+    /// reordering that produced this DSACK is likely to produce more,
+    /// and RFC 8985 §7.4 recommends leaning the window wider after such
+    /// direct evidence instead of waiting for it to organically grow.
+    fn sack_dsack_undo(tcb: &mut TcpControlBlock, block: SackBlock) {
+        if tcb.sack.undo_pending {
+            let smss = tcb.effective_mss.max(1);
+            tcb.cwnd = tcb.sack.undo_cwnd.max(smss);
+            tcb.ssthresh = tcb.sack.undo_ssthresh;
+            tcb.cwv.cwnd_raw = tcb.cwnd;
+            tcb.in_fast_recovery = false;
+            tcb.sack.undo_pending = false;
+            tcb.sack.dsack_undo = tcb.sack.dsack_undo.saturating_add(1);
+            log::info!(
+                "TCP SACK: DSACK undo for [{}, {}) â€” restoring cwnd={} ssthresh={} {:?}",
+                block.left,
+                block.right,
+                tcb.cwnd,
+                tcb.ssthresh,
+                tcb.tuple
+            );
+        }
+
+        let widened = Duration::from_nanos(
+            tcb.sack
+                .rack_reo_wnd
+                .as_nanos()
+                .saturating_mul(2)
+                .max(Duration::from_millis(1).as_nanos()),
+        );
+        tcb.sack.rack_reo_wnd = widened;
+        tcb.sack.rack_reo_wnd_persist = tcb.sack.rack_reo_wnd_persist.saturating_add(16);
+    }
+
+    /// Snapshots `cwnd`/`ssthresh` immediately before a SACK/RACK-triggered
+    /// congestion response, so a later DSACK can undo it via
+    /// [`Self::sack_dsack_undo`] if the "loss" turns out to have been mere
+    /// reordering.
+    fn sack_enter_recovery(tcb: &mut TcpControlBlock) {
+        tcb.sack.undo_cwnd = tcb.cwnd;
+        tcb.sack.undo_ssthresh = tcb.ssthresh;
+        tcb.sack.undo_pending = true;
+    }
+
+    /// RFC 6675 §4 `IsLost`: a segment is presumed lost once enough data
+    /// *above* it in sequence space has already been SACKed by the peer â€”
+    /// specifically `DUP_THRESH * SMSS` bytes' worth, mirroring the classic
+    /// three-duplicate-ACK heuristic but expressed in bytes so it still
+    /// works when SACKed runs are made of segments smaller than SMSS.
+    fn sack_mark_lost(tcb: &mut TcpControlBlock) {
+        let smss = tcb.effective_mss.max(1);
+        let threshold = DUP_THRESH.saturating_mul(smss);
+
+        // Collect candidate sequence numbers first: `sack_bytes_above` reads
+        // the whole queue, so it can't run concurrently with a mutable
+        // iterator over the same queue.
+        let candidates: Vec<u32> = tcb
+            .retransmission_queue
+            .iter()
+            .filter(|s| !s.sacked)
+            .map(|s| s.seq)
+            .collect();
+
+        for seq in candidates {
+            if Self::sack_bytes_above(tcb, seq) < threshold {
+                continue;
+            }
+            if let Some(seg) = tcb.retransmission_queue.iter_mut().find(|s| s.seq == seq) {
+                if !seg.sacked && !seg.lost {
+                    seg.lost = true;
+                    tcb.sack.islost_marks = tcb.sack.islost_marks.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    /// Total bytes already SACKed by segments starting at or after `seq` â€”
+    /// the quantity RFC 6675's `IsLost` compares against `DupThresh * SMSS`.
+    fn sack_bytes_above(tcb: &TcpControlBlock, seq: u32) -> u32 {
+        tcb.retransmission_queue
+            .iter()
+            .filter(|s| s.sacked && (s.seq.wrapping_sub(seq) as i32) >= 0)
+            .map(|s| s.end_seq().wrapping_sub(s.seq))
+            .fold(0u32, |acc, len| acc.saturating_add(len))
+    }
+
+    /// RFC 6675 §4 `pipe`: bytes still presumed to be in flight and able to
+    /// trigger further ACKs â€” i.e. neither already SACKed (delivered) nor
+    /// marked lost (not expected to arrive). This is the SACK-aware
+    /// replacement for the plain `SND.NXT - SND.UNA` flight estimate used
+    /// for congestion accounting once loss recovery is under way: it stops
+    /// counting bytes that are known-delivered or known-gone, so `cwnd`
+    /// comparisons during recovery aren't skewed by them.
+    fn sack_pipe_bytes(tcb: &TcpControlBlock) -> u32 {
+        tcb.retransmission_queue
+            .iter()
+            .filter(|s| !s.sacked && !s.lost)
+            .map(|s| s.end_seq().wrapping_sub(s.seq))
+            .fold(0u32, |acc, len| acc.saturating_add(len))
+    }
+
+    /// Whether the scoreboard currently has any confirmed-lost, not-yet-
+    /// resent hole (`lost && !sacked`). Used both to decide whether to enter
+    /// recovery and, indirectly via `sack_pipe_bytes`, congestion accounting.
+    fn sack_has_lost(tcb: &TcpControlBlock) -> bool {
+        tcb.retransmission_queue.iter().any(|s| s.lost && !s.sacked)
+    }
+
+    /// RFC 8985 §7.2 RACK: time-based loss detection layered on top of the
+    /// SACK scoreboard.
+    ///
+    /// Core idea: once we know segment X was delivered (it's now `sacked`),
+    /// any *other* outstanding segment transmitted clearly earlier than X â€”
+    /// earlier by more than the reordering window, not just earlier â€” almost
+    /// certainly isn't merely taking a different, slower path; it was lost.
+    /// Unlike the sequence-counting heuristics (dupACK count, RFC 6675
+    /// `IsLost` byte threshold), this reasons about *when* packets were put
+    /// on the wire, which reacts correctly to reordering with very few
+    /// packets in flight (where the byte/count thresholds are too coarse).
+    fn rack_detect(tcb: &mut TcpControlBlock) {
+        // Newest transmission time among segments we now have direct
+        // delivery evidence for. `xmit_mstamp` is the time of the *last*
+        // copy sent (RFC 8985 §5), so this is safe to use even for
+        // retransmitted segments â€” no Karn's-algorithm ambiguity, because
+        // we're not trying to sample RTT here, only to time-order deliveries.
+        let newest_xmit = tcb
+            .retransmission_queue
+            .iter()
+            .filter(|s| s.sacked)
+            .map(|s| s.xmit_mstamp)
+            .max();
+
+        if let Some(xmit_ts) = newest_xmit {
+            if xmit_ts > tcb.sack.rack_xmit_ts {
+                tcb.sack.rack_xmit_ts = xmit_ts;
+                let now = Instant::now();
+                if now > xmit_ts {
+                    let rtt = now - xmit_ts;
+                    tcb.sack.rack_rtt = rtt;
+                    tcb.sack.rack_min_rtt = tcb.sack.rack_min_rtt.min(rtt);
+                }
+            }
+        }
+
+        Self::rack_update_reo_wnd(tcb);
+
+        let rack_xmit_ts = tcb.sack.rack_xmit_ts;
+        let reo_wnd = tcb.sack.rack_reo_wnd;
+        for seg in tcb.retransmission_queue.iter_mut() {
+            if seg.sacked || seg.lost {
+                continue;
+            }
+            if rack_xmit_ts > seg.xmit_mstamp && (rack_xmit_ts - seg.xmit_mstamp) > reo_wnd {
+                seg.lost = true;
+                tcb.sack.rack_marks = tcb.sack.rack_marks.saturating_add(1);
+            }
+        }
+    }
+
+    /// RFC 8985 §7.4: (re)compute the reordering window RACK uses to decide
+    /// "clearly earlier" in [`Self::rack_detect`].
+    ///
+    /// While `rack_reo_wnd_persist` is nonzero â€” freshly bumped by a DSACK
+    /// in [`Self::sack_dsack_undo`] â€” the widened window from that DSACK is
+    /// left untouched for a few more rounds instead of immediately
+    /// recomputing it back down, since the reordering that produced one
+    /// DSACK is likely to produce more in the very near future.
+    fn rack_update_reo_wnd(tcb: &mut TcpControlBlock) {
+        if tcb.sack.rack_reo_wnd_persist > 0 {
+            tcb.sack.rack_reo_wnd_persist -= 1;
+            return;
+        }
+        // RFC 8985 §7.4 baseline: a quarter of the smallest RTT observed â€”
+        // tight enough to catch real loss promptly, loose enough to absorb
+        // ordinary reordering on this path.
+        tcb.sack.rack_reo_wnd = Duration::from_nanos(tcb.sack.rack_min_rtt.as_nanos() / 4);
+    }
+
+    /// Feeds a fresh RTT sample (from either the sequence probe or the
+    /// Timestamp-echo estimator â€” RACK doesn't care which) into RACK's own
+    /// minimum-RTT tracker, which anchors the reordering-window baseline in
+    /// [`Self::rack_update_reo_wnd`].
+    fn rack_feed_rtt(tcb: &mut TcpControlBlock, r: Duration) {
+        tcb.sack.rack_min_rtt = tcb.sack.rack_min_rtt.min(r);
+    }
+
+    /// RFC 8985 §7.1: (re)arm the Tail Loss Probe timer.
+    ///
+    /// Call this any time the outstanding data set changes in a way that
+    /// should restart the probe countdown: a new segment goes out, or an
+    /// ACK retires some of the queue. If nothing is outstanding, or we're
+    /// already in Fast Recovery (which has its own, faster loss-repair
+    /// path), the probe is disarmed instead.
+    ///
+    /// The PTO itself follows RFC 8985 §7.1's two cases:
+    ///   - More than one segment outstanding: `2 * SRTT`, floored at 10ms.
+    ///   - Exactly one segment outstanding: `SRTT + 4*RTTVAR`, floored at a
+    ///     worst-case delayed-ACK allowance (~200ms) â€” otherwise the probe
+    ///     could fire before the peer's own delayed-ACK timer even had a
+    ///     chance to acknowledge the lone outstanding segment.
+    fn tlp_arm(tcb: &mut TcpControlBlock) {
+        if tcb.retransmission_queue.is_empty() || tcb.in_fast_recovery {
+            tcb.sack.tlp_deadline = None;
+            return;
+        }
+
+        let srtt = tcb.srtt.unwrap_or(Duration::from_millis(200));
+        let rttvar = tcb.rttvar.unwrap_or(Duration::from_millis(50));
+        const MIN_PTO: Duration = Duration::from_millis(10);
+        const WORST_CASE_DELAYED_ACK: Duration = Duration::from_millis(200);
+
+        let pto = if tcb.retransmission_queue.len() > 1 {
+            Duration::from_nanos(srtt.as_nanos().saturating_mul(2)).max(MIN_PTO)
+        } else {
+            let jitter = Duration::from_nanos(rttvar.as_nanos().saturating_mul(4));
+            Duration::from_nanos(srtt.as_nanos().saturating_add(jitter.as_nanos()))
+                .max(WORST_CASE_DELAYED_ACK)
+        };
+        tcb.sack.tlp_deadline = Some(Instant::now() + pto);
+    }
+
+    /// RFC 8985 §7.2: send the probe once the PTO armed by
+    /// [`Self::tlp_arm`] expires without other progress.
+    ///
+    /// Prefers sending new, never-before-transmitted data if the send
+    /// buffer and window allow it â€” the probe then also makes forward
+    /// progress instead of being "wasted" bandwidth. Otherwise it
+    /// retransmits the *highest*-sequence outstanding segment (not the
+    /// head): if the tail was actually lost, this is the fastest way to
+    /// find out, and if it wasn't, the duplicate ACK it provokes tells us
+    /// the head-of-line segment is missing without waiting for a full RTO.
+    fn tlp_send_probe_unlocked(&self, tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        let send_new = {
+            let tcb = tcb_arc.read();
+            !tcb.send_buffer.is_empty() && tcb.can_send(1)
+        };
+
+        if send_new {
+            {
+                let mut tcb = tcb_arc.write();
+                tcb.sack.tlp_is_retrans = false;
+                tcb.sack.tlp_high_rxt = tcb.snd_nxt;
+                tcb.sack.tlp_probes = tcb.sack.tlp_probes.saturating_add(1);
+            }
+            self.process_send_queue(tcb_arc.clone());
+            return;
+        }
+
+        let (socket, mut hdr, data, opts, tos) = {
+            let mut tcb = tcb_arc.write();
+            let Some(seg_idx) =
+                (!tcb.retransmission_queue.is_empty()).then(|| tcb.retransmission_queue.len() - 1)
+            else {
+                return;
+            };
+
+            let (opts, _tsval) = Self::established_outgoing_options(&mut tcb);
+            let now = Instant::now();
+            if let Some(seg) = tcb.retransmission_queue.get_mut(seg_idx) {
+                seg.xmit_mstamp = now;
+                seg.retrans = true;
+            }
+            tcb.sack.tlp_is_retrans = true;
+            tcb.sack.tlp_high_rxt = tcb.snd_nxt;
+            tcb.sack.tlp_probes = tcb.sack.tlp_probes.saturating_add(1);
+
+            let seg = &tcb.retransmission_queue[seg_idx];
+            let mut hdr = TcpDatagramHeader::new(&tcb);
+            hdr.set_flags(seg.flags & !TcpDatagramHeader::CWR);
+            hdr.set_sequence_number(seg.seq);
+            let data = seg.data.clone();
+            let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &data);
+            (tcb.socket.clone(), hdr, data, opts, tos)
+        };
+        self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &data, tos);
+    }
+
+    fn net_send_from_tcb(
+        &self,
+        tcb: &mut TcpControlBlock,
+        header: &mut TcpDatagramHeader,
+        data: &[u8],
+    ) -> Option<u32> {
+        let (opts, tsval) = Self::established_outgoing_options(tcb);
+        let tos = Self::apply_outgoing_ecn(tcb, header, data);
+        let _ = self.net_send_tcp_datagram_with_options(
+            tcb.socket.clone(),
+            header,
+            &opts.as_slice(),
+            data,
+            tos,
+        );
+        tsval
+    }
+
+    /// Stamp ECE/CWR on the TCP header and return IPv4 TOS for this TX.
+    ///
+    /// RFC 3168 §6.1.2â€“§6.1.3 + §5: capable flows use ECT(0); sticky ECE while
+    /// `echo_pending`; CWR once on the next data-bearing segment after MD.
+    fn apply_outgoing_ecn(
+        tcb: &mut TcpControlBlock,
+        header: &mut TcpDatagramHeader,
+        data: &[u8],
+    ) -> u8 {
+        if !tcb.ecn.enabled {
+            return 0;
+        }
+
+        if tcb.ecn.echo_pending && header.is_ack() {
+            header.set_flag(TcpDatagramHeader::ECE, true);
+            tcb.ecn.ece_tx = tcb.ecn.ece_tx.saturating_add(1);
+        }
+
+        if tcb.ecn.cwr_pending && !data.is_empty() {
+            header.set_flag(TcpDatagramHeader::CWR, true);
+            tcb.ecn.cwr_tx = tcb.ecn.cwr_tx.saturating_add(1);
+            tcb.ecn.cwr_pending = false;
+        }
+
+        IP_ECN_ECT0
+    }
+
+    /// RFC 7323 §4.3 + §5 PAWS. Returns `false` if the segment must be dropped.
+    fn on_rx_timestamp(
+        tcb: &mut TcpControlBlock,
+        seg_seq: u32,
+        tsval: u32,
+        is_syn: bool,
+        is_rst: bool,
+    ) -> bool {
+        if !tcb.ts.enabled {
+            return true;
+        }
+
+        let idle = (Instant::now() - tcb.ts.recent_age) > PAWS_IDLE;
+
+        // RFC 7323 §5.1: RST and SYN are exempt from PAWS drop.
+        if !is_rst && !is_syn && !idle && tcb.ts.ts_recent != 0 {
+            if (tsval.wrapping_sub(tcb.ts.ts_recent) as i32) < 0 {
+                log::trace!(
+                    "TCP PAWS drop: TSval={} < TS.Recent={} seq={}",
+                    tsval,
+                    tcb.ts.ts_recent,
+                    seg_seq
+                );
+                return false;
+            }
+        }
+
+        // RFC 7323 §4.3: refresh TS.Recent when SEG.SEQ advances.
+        let advances = (seg_seq.wrapping_sub(tcb.ts.last_ack_ts_seq) as i32) >= 0;
+        if advances || is_syn {
+            tcb.ts.ts_recent = tsval;
+            tcb.ts.last_ack_ts_seq = seg_seq;
+            tcb.ts.recent_age = Instant::now();
+        }
+        true
+    }
+
+    /// RFC 4015 step (0) â€” call *before* timeout-driven MD.
+    ///
+    /// Policy: Eifel only when Timestamps are negotiated.
+    fn eifel_on_rto_before_md(tcb: &mut TcpControlBlock) {
+        if !tcb.ts.enabled {
+            return;
+        }
+        tcb.frto.clear(); // never leave F-RTO armed alongside Eifel undo
+        let flight = tcb.flight_size_bytes();
+        tcb.eifel.pipe_prev = Some(core::cmp::max(flight, tcb.ssthresh));
+        tcb.eifel.snd_max = Some(tcb.snd_nxt);
+        tcb.eifel.bytes_acked = 0;
+    }
+
+    fn eifel_clear_pending(tcb: &mut TcpControlBlock) {
+        tcb.eifel.pipe_prev = None;
+        tcb.eifel.retransmit_ts = None;
+        tcb.eifel.snd_max = None;
+        tcb.eifel.bytes_acked = 0;
+    }
+
+    /// RFC 5682 â€” arm F-RTO when Timestamps are unavailable.
+    ///
+    /// Called from `tick_retransmission_timer` immediately before MD when
+    /// `!tcb.ts.enabled`. Stores undo snapshot and enters Step1. The caller
+    /// still performs MD and retransmits exactly the queue head once.
+    fn frto_on_rto(tcb: &mut TcpControlBlock, rto_retrans_end: u32) {
+        debug_assert!(
+            !tcb.ts.enabled,
+            "F-RTO must not arm when Timestamps/Eifel are active"
+        );
+        tcb.frto.prev_cwnd = tcb.cwnd;
+        tcb.frto.prev_ssthresh = tcb.ssthresh;
+        tcb.frto.recover_nxt = tcb.snd_nxt;
+        tcb.frto.rto_retrans_end = rto_retrans_end;
+        tcb.frto.phase = FrtoPhase::Step1;
+        Self::eifel_clear_pending(tcb);
+        log::info!(
+            "TCP F-RTO Step1 armed recover_nxt={} rto_end={} cwnd={} ssthresh={} {:?}",
+            tcb.frto.recover_nxt,
+            rto_retrans_end,
+            tcb.cwnd,
+            tcb.ssthresh,
+            tcb.tuple
+        );
+    }
+
+    /// RFC 5682 §3 â€” drive Step1 / Step2 from the ACK path.
+    ///
+    /// `is_dup`: true when this segment did not advance SND.UNA (the existing
+    /// duplicate-ACK arm). False when `ack > prev_snd_una`.
+    ///
+    /// No-op when Timestamps are on (Eifel owns spurious detection).
+    fn frto_on_ack(tcb: &mut TcpControlBlock, ack: u32, is_dup: bool) {
+        if tcb.ts.enabled {
+            tcb.frto.clear();
+            return;
+        }
+        match tcb.frto.phase {
+            FrtoPhase::Idle => {}
+            FrtoPhase::Step1 => {
+                if is_dup {
+                    // First feedback after RTO retransmit is a dupACK â†’ real loss.
+                    tcb.frto.declared_loss_count = tcb.frto.declared_loss_count.saturating_add(1);
+                    tcb.frto.clear();
+                    log::info!(
+                        "TCP F-RTO Step1: dupACK ack={} â†’ not spurious {:?}",
+                        ack,
+                        tcb.tuple
+                    );
+                    return;
+                }
+                // Cumulative ACK advanced SND.UNA â†’ probe with never-sent data.
+                tcb.frto.phase = FrtoPhase::Step2;
+                // Ensure at least one SMSS of send window for the new-data probe.
+                let smss = tcb.effective_mss.max(1);
+                tcb.cwnd = tcb.cwnd.max(smss);
+                tcb.cwv.cwnd_raw = tcb.cwv.cwnd_raw.max(smss);
+                log::info!(
+                    "TCP F-RTO Step2: ACK advanced ack={} â†’ send new-data probe {:?}",
+                    ack,
+                    tcb.tuple
+                );
+            }
+            FrtoPhase::Step2 => {
+                if is_dup {
+                    tcb.frto.declared_loss_count = tcb.frto.declared_loss_count.saturating_add(1);
+                    tcb.frto.clear();
+                    log::info!(
+                        "TCP F-RTO Step2: dupACK ack={} â†’ not spurious {:?}",
+                        ack,
+                        tcb.tuple
+                    );
+                    return;
+                }
+                // Further cumulative progress â†’ spurious RTO.
+                Self::frto_declare_spurious(tcb);
+            }
+        }
+    }
+
+    /// RFC 5682 §3 â€” undo congestion response after F-RTO declares spurious.
+    ///
+    /// Restores `ssthresh` from the pre-RTO snapshot and sets `cwnd` so the
+    /// pipe is not left empty (FlightSize + SMSS, floored at 2Â·SMSS). Clears
+    /// any pending Eifel state as a safety measure (should already be idle).
+    fn frto_declare_spurious(tcb: &mut TcpControlBlock) {
+        let smss = tcb.effective_mss.max(1);
+        tcb.ssthresh = tcb.frto.prev_ssthresh.max((2 * smss).max(tcb.ssthresh));
+        let flight = tcb.flight_size_bytes();
+        tcb.cwnd = flight.saturating_add(smss).max(2 * smss);
+        tcb.cwv.cwnd_raw = tcb.cwnd;
+        tcb.abc.clear_accumulators();
+        Self::eifel_clear_pending(tcb);
+        tcb.in_fast_recovery = false;
+        tcb.frto.spurious_count = tcb.frto.spurious_count.saturating_add(1);
+        log::info!(
+            "TCP F-RTO: spurious RTO undone cwnd={} ssthresh={} (was cwnd={} ssthresh={}) {:?}",
+            tcb.cwnd,
+            tcb.ssthresh,
+            tcb.frto.prev_cwnd,
+            tcb.frto.prev_ssthresh,
+            tcb.tuple
+        );
+        tcb.frto.clear();
+    }
+
+    /// RFC 3522 Detection + RFC 4015 steps (8)/(9).
+    fn eifel_on_acceptable_ack(tcb: &mut TcpControlBlock, tsecr: Option<u32>, ece: bool) {
+        let Some(retransmit_ts) = tcb.eifel.retransmit_ts else {
+            return;
+        };
+        let Some(tsecr) = tsecr else {
+            Self::eifel_clear_pending(tcb);
+            return;
+        };
+
+        // RFC 3522 §3.1: TSecr < RetransmitTS â‡’ spurious RTO.
+        // Compare in modulo-2ÂłÂ˛ serial space (same as PAWS / RFC 7323), not via
+        // bare `as i32` â€” near wrap (e.g. TSecr=5, RetransmitTS=0xFFFF_FFF0)
+        // a plain cast mis-orders the timestamps.
+        let spurious = (tsecr.wrapping_sub(retransmit_ts) as i32) < 0;
+        if !spurious || ece {
+            Self::eifel_clear_pending(tcb);
+            return;
+        }
+
+        let pipe_prev = tcb.eifel.pipe_prev.unwrap_or(tcb.flight_size_bytes());
+        let snd_max = tcb.eifel.snd_max.unwrap_or(tcb.snd_nxt);
+        let bump = core::cmp::min(tcb.eifel.bytes_acked, EIFEL_IW_BYTES);
+        let flight = tcb.flight_size_bytes();
+
+        // RFC 4015 §3.4 step (9)
+        tcb.cwnd = flight.saturating_add(bump);
+        tcb.cwv.cwnd_raw = tcb.cwnd;
+        tcb.ssthresh = pipe_prev;
+        tcb.abc.clear_accumulators();
+        // RFC 4015 step (8)
+        if (snd_max.wrapping_sub(tcb.snd_una) as i32) >= 0 {
+            tcb.snd_nxt = snd_max;
+        }
+        tcb.in_fast_recovery = false;
+        tcb.eifel.spurious_count = tcb.eifel.spurious_count.saturating_add(1);
+
+        log::info!(
+            "TCP Eifel Response: spurious RTO TSecr={} < RetransmitTS={} cwnd={} ssthresh={}",
+            tsecr,
+            retransmit_ts,
+            tcb.cwnd,
+            tcb.ssthresh
+        );
+        Self::eifel_clear_pending(tcb);
+    }
+
+    fn net_send_tcp_datagram(&self, socket: Socket, header: &mut TcpDatagramHeader, data: &[u8]) {
+        self.net_send_tcp_datagram_with_options(socket, header, &[], data, 0);
+    }
+
+    fn send_immediate_ack_unlocked(&self, tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        let (socket, mut hdr, opts, tos) = {
+            let mut tcb = tcb_arc.write();
+            let mut hdr = TcpDatagramHeader::new(&tcb);
+            hdr.set_flag(TcpDatagramHeader::ACK, true);
+            let (opts, _) = Self::established_outgoing_options(&mut tcb);
+            // Receiver feedback path: sticky ECE while echo_pending (RFC 3168 §6.1.3).
+            let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &[]);
+            (tcb.socket.clone(), hdr, opts, tos)
+        };
+        self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &[], tos);
+    }
+
+    /// Retransmits the first queued segment not yet covered by `ack`.
+    ///
+    /// Used on a partial ACK during Fast Recovery (RFC 6582 NewReno): the
+    /// peer has acknowledged some but not all of the recovery window, which
+    /// means a second segment was lost in the same round trip and needs to
+    /// go out again without waiting for another three duplicate ACKs.
+    fn retransmit_first_unacked(&self, tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>, ack: u32) {
+        self.retransmit_matching_unlocked(tcb_arc, RetransmitCause::PartialAck, Some(ack));
+    }
+
+    /// Retransmits the head of the retransmission queue on the classic
+    /// three-duplicate-ACK Fast Retransmit signal (RFC 5681 §3.2).
+    fn fast_retransmit_front(&self, tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        self.retransmit_front_unlocked(tcb_arc, RetransmitCause::FastRetransmit);
+    }
+
+    /// Retransmits the head of the retransmission queue.
+    ///
+    /// Shared by the RTO timer path and Fast Retransmit. On [`RetransmitCause::Rto`]
+    /// we also stamp Eifel `RetransmitTS` (RFC 3522).
+    fn retransmit_front_unlocked(
+        &self,
+        tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        cause: RetransmitCause,
+    ) {
+        self.retransmit_matching_unlocked(tcb_arc, cause, None);
+    }
+
+    fn retransmit_matching_unlocked(
+        &self,
+        tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        cause: RetransmitCause,
+        partial_ack: Option<u32>,
+    ) {
+        let (socket, mut hdr, data, opts, tos) = {
+            let mut tcb = tcb_arc.write();
+            let seg_idx = if tcb.sack.enabled {
+                // RFC 6675 §5: retransmit the lowest-sequence hole the
+                // scoreboard has explicitly marked IsLost (or RACK-lost)
+                // that the peer hasn't already SACKed out from under us.
+                // If nothing is marked lost yet (e.g. the very first
+                // retransmit of a fresh recovery episode) fall back to the
+                // lowest segment that isn't already known to be SACKed.
+                tcb.retransmission_queue
+                    .iter()
+                    .position(|s| s.lost && !s.sacked)
+                    .or_else(|| tcb.retransmission_queue.iter().position(|s| !s.sacked))
+            } else if let Some(ack) = partial_ack {
+                tcb.retransmission_queue
+                    .iter()
+                    .position(|s| (ack.wrapping_sub(s.end_seq()) as i32) < 0)
+            } else {
+                if tcb.retransmission_queue.is_empty() {
+                    None
+                } else {
+                    Some(0)
+                }
+            };
+            let Some(seg_idx) = seg_idx else {
+                return;
+            };
+
+            let (opts, tsval) = Self::established_outgoing_options(&mut tcb);
+            if cause == RetransmitCause::Rto {
+                // RetransmitTS only for Eifel (Timestamps path).
+                if tcb.ts.enabled {
+                    if let Some(v) = tsval {
+                        tcb.eifel.retransmit_ts = Some(v);
+                        if let Some(seg) = tcb.retransmission_queue.get_mut(seg_idx) {
+                            seg.retransmit_tsval = Some(v);
+                        }
+                    }
+                }
+            }
+
+            let now = Instant::now();
+            if let Some(seg) = tcb.retransmission_queue.get_mut(seg_idx) {
+                // RFC 8985 §5: every (re)transmission refreshes xmit_mstamp
+                // so RACK can time-order this copy against future ACKs.
+                // Clear `lost` â€” we're actively repairing this hole now â€”
+                // and mark `retrans` so a later cumulative ACK covering it
+                // can't be mistaken for an original-transmission RTT sample
+                // (Karn's algorithm).
+                seg.xmit_mstamp = now;
+                seg.retrans = true;
+                seg.lost = false;
+            }
+            if tcb.sack.enabled {
+                tcb.sack.rexmit_holes = tcb.sack.rexmit_holes.saturating_add(1);
+            }
+
+            let seg = &tcb.retransmission_queue[seg_idx];
+            let mut hdr = TcpDatagramHeader::new(&tcb);
+            // Strip any stale CWR from the stored flags; CWR is one-shot via apply_outgoing_ecn.
+            hdr.set_flags(seg.flags & !TcpDatagramHeader::CWR);
+            hdr.set_sequence_number(seg.seq);
+            let data = seg.data.clone();
+            let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &data);
+            (tcb.socket.clone(), hdr, data, opts, tos)
+        };
+        self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &data, tos);
+    }
+
+    /// Finalises and transmits a TCP segment, including optional options.
+    ///
+    /// Computes the TCP checksum over pseudo-header + header (with options) + payload.
+    /// `tos` is the IPv4 Type-of-Service byte (ECN in the low 2 bits; RFC 3168 §5).
+    fn net_send_tcp_datagram_with_options(
+        &self,
+        socket: Socket,
+        header: &mut TcpDatagramHeader,
+        options: &[u8],
+        data: &[u8],
+        tos: u8,
+    ) -> bool {
+        let header_len = 20 + options.len();
+        header.set_offset((header_len / 4) as u8);
+
+        let mut header_buf = [0u8; 60];
+        header_buf[..20].copy_from_slice(header.as_bytes());
+        if !options.is_empty() {
+            header_buf[20..header_len].copy_from_slice(options);
+        }
+
+        header.checksum = U16::from(self.calculate_tcp_checksum(
+            socket.local_address().octets(),
+            socket.remote_address().octets(),
+            &header_buf[..header_len],
+            data,
+        ));
+        header_buf[..20].copy_from_slice(header.as_bytes());
+
+        let mut storage = [0u8; DEFAULT_HEADER_RESERVE + SLOT_SIZE];
+        let mut packet_buffer = PacketBuffer::for_transmit(&mut storage, DEFAULT_HEADER_RESERVE);
+
+        packet_buffer.append_data(data);
+        if !options.is_empty() {
+            packet_buffer.prepend_bytes(&header_buf[20..header_len]);
+        }
+        packet_buffer.prepend_header(header);
+
+        let nic = socket.nic();
+        let dst_ip = socket.remote_address();
+
+        let network_subsystem = kernel_ref().network_subsystem();
+        if let Err(()) = network_subsystem.ipv4().send_packet(
+            IpProtocol::Tcp,
+            &mut packet_buffer,
+            dst_ip,
+            nic,
+            tos,
+        ) {
+            log::warn!("TCP: send_packet failed (dst={}, nic={:?})", dst_ip, nic);
+            return false;
+        }
+        true
+    }
+
+    /// RFC 9293: 16-bit one's complement checksum over pseudo-header + segment.
+    fn calculate_tcp_checksum(
+        &self,
+        src_addr: [u8; 4],
+        dst_addr: [u8; 4],
+        header: &[u8],
+        data: &[u8],
+    ) -> u16 {
+        let mut sum: u32 = 0;
+
+        let mut add_u16_be = |hi: u8, lo: u8| {
+            sum = sum.wrapping_add(u16::from_be_bytes([hi, lo]) as u32);
+        };
+
+        add_u16_be(src_addr[0], src_addr[1]);
+        add_u16_be(src_addr[2], src_addr[3]);
+        add_u16_be(dst_addr[0], dst_addr[1]);
+        add_u16_be(dst_addr[2], dst_addr[3]);
+        // IPv4 pseudo-header: zero + protocol (TCP = 6)
+        add_u16_be(0, 6);
+        let tcp_len = (header.len() + data.len()) as u16;
+        sum = sum.wrapping_add(tcp_len as u32);
+
+        let combined = header.len() + data.len();
+        let get = |i: usize| {
+            if i < header.len() {
+                header[i]
+            } else {
+                data[i - header.len()]
+            }
+        };
+
+        let mut i = 0;
+        while i + 1 < combined {
+            sum = sum.wrapping_add(u16::from_be_bytes([get(i), get(i + 1)]) as u32);
+            i += 2;
+        }
+        if i < combined {
+            sum = sum.wrapping_add(u16::from_be_bytes([get(i), 0]) as u32);
+        }
+
+        while (sum >> 16) != 0 {
+            sum = (sum & 0xFFFF) + (sum >> 16);
+        }
+        !(sum as u16)
+    }
+
+    /// Sends the final ACK of the active-open handshake from thread context.
+    ///
+    /// Must not be called from ISR â€” Hyper-V TX may require interrupts for
+    /// DMA completion. Returns `true` once the ACK is successfully transmitted.
+    /// Handles an inbound SYN-ACK on a connection actively opening (RFC 9293 §3.5).
+    ///
+    /// Runs on [`RxProcessThread`] -- an ordinary kernel thread, not an
+    /// interrupt handler. All TCB mutation happens under one TCB write
+    /// lock; the resulting ACK (or standalone RST) is sent right after the
+    /// lock is dropped, from this same call, on this same thread. There's
+    /// no staging: [`TcpDriver::net_send_tcp_datagram`] hands frames to a
+    /// per-interface [`InterfaceTxQueue`], which never blocks the caller --
+    /// on a busy driver it just queues the frame and returns, so sending
+    /// synchronously here costs nothing more than sending from anywhere else.
+    fn process_syn_ack(
+        &self,
+        tcb: &Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        header: &TcpDatagramHeader,
+        options: &[u8],
+    ) {
+        let mut t = tcb.write();
+
+        if header.is_rst() {
+            // RFC 9293 §3.5: a RST in response to our SYN means the peer
+            // actively refused the connection (e.g. nothing listening there).
+            t.state = TcpState::Closed;
+            t.last_error = Some(TcpError::ConnectionReset);
+            t.retransmission_queue.clear();
+            t.rtt_m.probe = None;
+            t.event.notify();
+            t.handshake_gate.open();
+            return;
+        }
+
+        if t.state == TcpState::Established {
+            // We already finished the handshake; the peer is most likely
+            // retransmitting its SYN-ACK because our final ACK never
+            // reached them. Sending another ACK is always safe (RFC 9293
+            // doesn't mind a redundant one), so just do it -- no bookkeeping
+            // needed to tell "first" and "duplicate" apart.
+            let mut hdr = TcpDatagramHeader::new(&t);
+            hdr.set_flag(TcpDatagramHeader::ACK, true);
+            let tuple = t.tuple;
+            let _ = self.net_send_from_tcb(&mut t, &mut hdr, &[]);
+            drop(t);
+            log::info!("TCP: duplicate SYN-ACK, re-sent handshake ACK {:?}", tuple);
+            return;
+        }
+
+        if t.state != TcpState::SynSent {
+            return; // stray SYN-ACK for a connection that has moved past this stage
+        }
+
+        // RFC 9293 §3.10.7.3: the ACK field of a SYN-ACK must acknowledge our
+        // SYN, i.e. SND.UNA < SEG.ACK <= SND.NXT. Anything else doesn't
+        // belong to this handshake attempt and gets challenged with a RST.
+        if !t.is_acceptable_ack(header.ack_number.get()) {
+            let tuple = t.tuple;
+            let nic = t.socket.nic();
+            drop(t);
+            self.send_standalone_rst(tuple, header, nic);
+            return;
+        }
+
+        let seq = header.sequence_number.get();
+        let ack = header.ack_number.get();
+        let wire_wnd = header.window_size.get();
+
+        Self::apply_peer_tcp_options(&mut t, options, seq);
+        if let Some((tsval, tsecr)) = Self::find_timestamp(options) {
+            // Peer offered Timestamps â€” enable and seed PAWS / RTT.
+            t.ts.enabled = true;
+            let _ = Self::on_rx_timestamp(&mut t, seq, tsval, true, false);
+            if tsecr != 0 {
+                let rtt_ms = Self::tcp_ts_now(t.ts.offset).wrapping_sub(tsecr);
+                if rtt_ms > 0 && rtt_ms < 60_000 {
+                    let r = Duration::from_millis(rtt_ms as u64);
+                    t.rtt_m.last_ts_sample = Some(r);
+                    Self::update_rtt_estimators(&mut t, r);
+                }
+            }
+            t.recompute_effective_mss();
+        }
+        // Complete (or discard) the SYN RTT probe armed in `connect()`.
+        //
+        // Without this, when Timestamps are *not* negotiated the probe stays
+        // armed with `end = ISS+1` and is finally consumed by the first data
+        // ACK in `process_data_datagram` â€” yielding a bogus RTT measured from
+        // SYN send time, which poisons SRTT/RTTVAR/RTO.
+        //
+        // With Timestamps, estimators were already updated from TSecr above;
+        // still clear the probe so it cannot be re-consumed later.
+        if let Some(p) = t.rtt_m.probe.take() {
+            if (ack.wrapping_sub(p.end) as i32) >= 0 {
+                let r = Instant::now() - p.sent_at;
+                t.rtt_m.last_probe_sample = Some(r);
+                if !t.ts.enabled {
+                    Self::update_rtt_estimators(&mut t, r);
+                    log::trace!("TCP RTT probe(SYN)={:?} {:?}", r, t.tuple);
+                }
+            }
+        }
+        // RFC 3168 §6.1.1: complete ECN negotiation on SYN-ACK with ECE=1, CWR=0.
+        t.ecn.enabled =
+            header.get_flag(TcpDatagramHeader::ECE) && !header.get_flag(TcpDatagramHeader::CWR);
+        if t.ecn.enabled {
+            log::info!("TCP: ECN negotiated (active open) {:?}", t.tuple);
+        }
+        t.snd_wnd = t.scale_peer_window(wire_wnd);
+        t.snd_wl1 = seq;
+        t.snd_wl2 = ack;
+        t.irs = seq;
+        t.rcv_nxt = seq.wrapping_add(1);
+        t.snd_una = ack;
+        self.drain_retransmission_queue(&mut t, ack);
+        t.state = TcpState::Established;
+        t.event.notify();
+
+        let mut hdr = TcpDatagramHeader::new(&t);
+        hdr.set_flag(TcpDatagramHeader::ACK, true);
+        let tuple = t.tuple;
+        let _ = self.net_send_from_tcb(&mut t, &mut hdr, &[]);
+        drop(t);
+
+        tcb.read().handshake_gate.open();
+        log::info!("TCP: handshake complete {:?}", tuple);
+    }
+
+    fn apply_peer_tcp_options(tcb: &mut TcpControlBlock, options: &[u8], seg_seq: u32) {
+        for opt in TcpOptionsParser::new(options) {
+            match opt {
+                TcpOption::Mss(mss) => {
+                    tcb.peer_mss = mss;
+                    log::trace!("TCP: Peer MSS = {}", mss);
+                }
+                TcpOption::WindowScale(shift) => {
+                    tcb.snd_wscale = shift.min(14);
+                    tcb.wnd_scale_enabled = true;
+                    log::trace!("TCP: Peer Window Scale = {}", shift);
+                }
+                TcpOption::Timestamp { tsval, .. } => {
+                    tcb.ts.enabled = true;
+                    tcb.ts.ts_recent = tsval;
+                    tcb.ts.last_ack_ts_seq = seg_seq;
+                    tcb.ts.recent_age = Instant::now();
+                    log::trace!("TCP: Peer Timestamps enabled, TS.Recent={}", tsval);
+                }
+                TcpOption::SackPermitted => {
+                    // RFC 2018 §2: SACK-Permitted MUST only appear on a SYN
+                    // segment; both ends must offer it for the option to be
+                    // used for the lifetime of the connection.
+                    tcb.sack.enabled = true;
+                    log::trace!("TCP: Peer SACK-Permitted, SACK enabled {:?}", tcb.tuple);
+                }
+                _ => {}
+            }
+        }
+        tcb.recompute_effective_mss();
+    }
+
+    /// Handles an inbound SYN for a port in LISTEN state (passive open).
+    ///
+    /// Called from ISR context â€” the TCB is brand new here, so there's no
+    /// shared state to race on until it's inserted into `connections`.
+    fn process_passive_syn(
+        &self,
+        tuple: ConnectionTuple,
+        header: &TcpDatagramHeader,
+        options: &[u8],
+        nic: NetworkInterfaceId,
+    ) {
+        let Some(opts) = super::tcp_socket::listener_opts_for_port(self, tuple.local_port) else {
+            self.send_standalone_rst(tuple, header, nic);
+            return;
+        };
+
+        let iss = RdRand::new().unwrap().get_u32().unwrap();
+        let socket = Socket::new(
+            tuple.local_ip,
+            tuple.local_port,
+            tuple.remote_ip,
+            tuple.remote_port,
+            nic,
+        );
+
+        let mut tcb = TcpControlBlock::new(
+            iss,
+            tuple,
+            socket.clone(),
+            opts.nagle_enabled,
+            opts.cwv_enabled,
+            opts.pacing_enabled,
+        );
+        let buf_cap = if opts.recv_buf_size > 0 {
+            opts.recv_buf_size
+        } else {
+            tcb.receive_buffer.capacity()
+        };
+        tcb.receive_buffer = TcpReceiveBuffer::new(buf_cap);
+        tcb.max_rcv_wnd = buf_cap as u32;
+        tcb.rcv_wscale = opts.rcv_wscale;
+        tcb.wnd_scale_enabled = true;
+        tcb.update_rcv_wnd_from_buffer();
+        tcb.state = TcpState::SynReceived;
+        tcb.irs = header.sequence_number.get();
+        tcb.rcv_nxt = tcb.irs.wrapping_add(1);
+        Self::apply_peer_tcp_options(&mut tcb, options, header.sequence_number.get());
+        // RFC 3168 §6.1.1: peer offered ECN iff SYN carried both ECE and CWR.
+        tcb.ecn.enabled =
+            header.get_flag(TcpDatagramHeader::ECE) && header.get_flag(TcpDatagramHeader::CWR);
+        // Seed SND.WND / WL* from the passive SYN (ACK may be 0 on SYN).
+        let syn_seq = header.sequence_number.get();
+        let syn_ack = header.ack_number.get();
+        tcb.snd_wnd = tcb.scale_peer_window(header.window_size.get());
+        tcb.snd_wl1 = syn_seq;
+        tcb.snd_wl2 = syn_ack;
+        tcb.snd_nxt = iss.wrapping_add(1);
+
+        let tcb_arc = Arc::new(IrqGuardedRwLock::new(tcb.clone()));
+        self.connections.write().insert(tuple, tcb_arc.clone());
+
+        let mut hdr = TcpDatagramHeader::new(&tcb);
+        hdr.set_sequence_number(iss);
+        hdr.set_acknowledgement_number(tcb.rcv_nxt);
+        hdr.set_flag(TcpDatagramHeader::SYN, true);
+        hdr.set_flag(TcpDatagramHeader::ACK, true);
+        // SYN-ACK: ECE=1, CWR=0 when accepting ECN (RFC 3168 Table 1). Not-ECT in IP.
+        if tcb.ecn.enabled {
+            hdr.set_flag(TcpDatagramHeader::ECE, true);
+            log::info!("TCP: ECN negotiated (passive open) {:?}", tuple);
+        }
+
+        let mut opt_writer = TcpOptionsWriter::new();
+        opt_writer.push_mss(DEFAULT_MSS);
+        opt_writer.push_window_scale(opts.rcv_wscale);
+        opt_writer.push_sack_permitted();
+        let mut synack_ts = None;
+        if tcb.ts.enabled {
+            let v = Self::tcp_ts_now(tcb.ts.offset);
+            opt_writer.push_timestamp(v, tcb.ts.ts_recent);
+            synack_ts = Some(v);
+        }
+        let synack_opts = opt_writer.finish();
+
+        {
+            let mut g = tcb_arc.write();
+            if let Some(v) = synack_ts {
+                g.ts.last_tx_tsval = v;
+            }
+            g.retransmission_queue.push_back(UnackedSegment {
+                seq: iss,
+                data: Vec::new(),
+                flags: hdr.flags,
+                send_time: Instant::now(),
+                retries: 0,
+                first_tsval: synack_ts,
+                retransmit_tsval: None,
+                sacked: false,
+                lost: false,
+                xmit_mstamp: Instant::now(),
+                retrans: false,
+            });
+        }
+
+        log::trace!("TCP: Passive SYN for {:?}, sending SYN-ACK", tuple);
+        self.net_send_tcp_datagram_with_options(socket, &mut hdr, synack_opts, &[], 0);
+    }
+
+    /// Completes passive open after the final ACK of the three-way handshake.
+    fn process_syn_received_ack(
+        &self,
+        tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        header: &TcpDatagramHeader,
+        payload: &[u8],
+        options: &[u8],
+        ip_ecn: u8,
+    ) {
+        if header.is_rst() {
+            let mut tcb = tcb_arc.write();
+            tcb.state = TcpState::Closed;
+            tcb.last_error = Some(TcpError::ConnectionReset);
+            tcb.event.notify();
+            return;
+        }
+
+        let local_port = {
+            let mut tcb = tcb_arc.write();
+            if tcb.state != TcpState::SynReceived || !header.is_ack() {
+                None
+            } else {
+                let ack = header.ack_number.get();
+                if !tcb.is_acceptable_ack(ack) {
+                    log::trace!("TCP: Invalid ACK in SynReceived for {:?}", tcb.tuple);
+                    None
+                } else {
+                    tcb.snd_una = ack;
+                    self.drain_retransmission_queue(&mut tcb, ack);
+                    tcb.state = TcpState::Established;
+                    tcb.event.notify();
+                    Some(tcb.tuple.local_port)
+                }
+            }
+        };
+
+        if let Some(port) = local_port {
+            super::tcp_socket::enqueue_accepted_connection(self, port, tcb_arc.clone());
+            if !payload.is_empty() || !options.is_empty() {
+                self.process_data_datagram(payload, header, options, tcb_arc, ip_ecn);
+            }
+        }
+    }
+
+    /// Processes an incoming segment for a connection past the handshake â€”
+    /// this is the main TCP data path (RFC 9293 §3.10.7).
+    ///
+    /// Runs on [`RxProcessThread`]. The whole check-and-update pass happens
+    /// under one TCB write lock; what to send afterwards is tracked in a
+    /// handful of plain local flags, and the actual sends happen right
+    /// after the lock is dropped, still on this same thread and this same
+    /// call -- there's no later flush pass to hand it off to.
+    ///
+    /// `ip_ecn` = IPv4 TOS low 2 bits (RFC 3168 §5).
+    fn process_data_datagram(
+        &self,
+        payload: &[u8],
+        header: &TcpDatagramHeader,
+        options: &[u8],
+        tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        ip_ecn: u8,
+    ) {
+        let seq = header.sequence_number.get();
+        let ce = (ip_ecn & 0b11) == IP_ECN_CE;
+        let ece = header.get_flag(TcpDatagramHeader::ECE);
+        let cwr = header.get_flag(TcpDatagramHeader::CWR);
+
+        // Fast path: if the segment's last byte is already below RCV.NXT, it
+        // carries nothing new (RFC 9293 §3.10.7.4) â€” almost certainly a
+        // retransmit the peer sent because our ACK for it was lost. ACK
+        // again to resync the peer and drop it, without taking the full
+        // processing pass below.
+        if !payload.is_empty() && !header.is_rst() {
+            let seg_end = seq.wrapping_add(payload.len() as u32);
+            let rcv_nxt = tcb_arc.read().rcv_nxt;
+            if (seg_end.wrapping_sub(rcv_nxt) as i32) <= 0 {
+                // Still honour CE â†’ ECE so congestion feedback is not lost on dups.
+                if ce {
+                    let mut tcb = tcb_arc.write();
+                    if tcb.ecn.enabled {
+                        tcb.ecn.ce_seen = tcb.ecn.ce_seen.saturating_add(1);
+                        tcb.ecn.echo_pending = true;
+                    }
+                }
+                let tuple = tcb_arc.read().tuple;
+                log::trace!(
+                    "TCP: RX dup/old data {:?} seq={} len={} rcv_nxt={} -> ACK only",
+                    tuple,
+                    seq,
+                    payload.len(),
+                    rcv_nxt
+                );
+                self.send_immediate_ack_unlocked(tcb_arc);
+                return;
+            }
+        }
+
+        let mut tcb = tcb_arc.write();
+
+        if header.is_rst() {
+            tcb.state = TcpState::Closed;
+            tcb.last_error = Some(TcpError::ConnectionReset);
+            tcb.event.notify();
+            return;
+        }
+
+        // RFC 9293 §3.10.7.4: once past the handshake, every segment MUST
+        // carry ACK. Drop illegal bare segments instead of panicking.
+        if !header.is_ack() {
+            log::warn!(
+                "TCP: drop segment without ACK in state {:?} seq={}",
+                tcb.state,
+                seq
+            );
+            return;
+        }
+
+        // --- ECN receive-side: CE in IP, ECE/CWR in TCP (RFC 3168) ----------
+        // CE means a router marked this packet instead of dropping it.
+        // We must *not* treat CE as packet loss (no dupACK/RTX); only echo it.
+        if tcb.ecn.enabled && ce {
+            tcb.ecn.ce_seen = tcb.ecn.ce_seen.saturating_add(1);
+            // RFC 3168 §6.1.3: set ECE on *subsequent* ACKs until CWR arrives.
+            tcb.ecn.echo_pending = true;
+        }
+        if tcb.ecn.enabled && cwr {
+            // Peer reduced cwnd â€” stop echoing.
+            tcb.ecn.echo_pending = false;
+        }
+
+        // RFC 7323 §3.2: after Timestamps are negotiated, require the option.
+        let ts_opt = Self::find_timestamp(options);
+        if tcb.ts.enabled && ts_opt.is_none() {
+            log::warn!("TCP: drop segment without Timestamp option seq={}", seq);
+            return;
+        }
+
+        if let Some((tsval, tsecr)) = ts_opt {
+            if !Self::on_rx_timestamp(&mut tcb, seq, tsval, header.is_syn(), false) {
+                return;
+            }
+            if tsecr != 0 {
+                let rtt_ms = Self::tcp_ts_now(tcb.ts.offset).wrapping_sub(tsecr);
+                if rtt_ms > 0 && rtt_ms < 60_000 {
+                    let r = Duration::from_millis(rtt_ms as u64);
+                    tcb.rtt_m.last_ts_sample = Some(r);
+                    if tcb.ts.enabled {
+                        Self::update_rtt_estimators(&mut tcb, r);
+                    }
+                }
+            }
+        }
+
+        // RFC 2018: parse any SACK blocks up front so both the cumulative-ACK
+        // and duplicate-ACK branches below can feed them into the sender-side
+        // scoreboard (`sack_tx_apply`) without re-walking the options twice.
+        let (sack_blocks_buf, sack_nblocks) = Self::parse_sack_blocks(options);
+        let sack_blocks = &sack_blocks_buf[..sack_nblocks];
+
+        let ack = header.ack_number.get();
+        let ack_acceptable = tcb.is_acceptable_ack(ack);
+
+        // What to do once the lock is dropped. `send_ack` doubles as the
+        // "was this send-side outcome an out-of-window/stale ACK" gate for
+        // the receive-side pass below, exactly mirroring RFC 9293's own
+        // "ACK acceptable" precondition on processing SEG.DATA/SEG.FIN.
+        let mut send_ack = tcb.ecn.enabled && tcb.ecn.echo_pending && ce;
+        let mut fast_retransmit = false;
+        let mut dup_recovery_inflate = false;
+        let mut partial_retransmit_ack: Option<u32> = None;
+        let mut run_send_queue = false;
+        let mut ack_log: Option<(ConnectionTuple, u32, u32, u32, u32, u32, u32, u32)> = None;
+
+        // --- ECN send-side reaction (RFC 3168 §6.1.2) -----------------------
+        // ECE on an ACK â‡’ reduce cwnd/ssthresh like a congestion event, but
+        // do *not* retransmit (data was delivered; only a mark was set).
+        // Gate on !cwr_pending so one ECE bout triggers one MD until we
+        // advertise CWR (avoids sticky-ECE spam â†’ cwnd collapse).
+        if ack_acceptable && tcb.ecn.enabled && ece && !tcb.ecn.cwr_pending && !tcb.in_fast_recovery
+        {
+            tcb.ecn.ece_rx = tcb.ecn.ece_rx.saturating_add(1);
+            self.on_congestion_event(&mut tcb);
+            tcb.ecn.ecn_md = tcb.ecn.ecn_md.saturating_add(1);
+            tcb.ecn.cwr_pending = true;
+            run_send_queue = true;
+            log::info!(
+                "TCP ECN: ECE received â€” MD cwnd={} ssthresh={} {:?}",
+                tcb.cwnd,
+                tcb.ssthresh,
+                tcb.tuple
+            );
+        }
+
+        if !ack_acceptable {
+            // RFC 9293 §3.10.7.4: ACK outside (SND.UNA, SND.NXT] doesn't
+            // belong to this connection's current send window at all â€”
+            // challenge it with an ACK carrying our real state.
+            send_ack = true;
+        } else if ack > tcb.snd_una {
+            // --- New data acknowledged: advance the send window ---------
+            let prev_snd_una = tcb.snd_una;
+            let prev_snd_wnd = tcb.snd_wnd;
+            let prev_cwnd = tcb.cwnd;
+
+            if tcb.in_fast_recovery {
+                // RFC 6582 (NewReno): an ACK covering the whole recovery
+                // point ends Fast Recovery. Anything short of that is a
+                // partial ACK repairing a second loss within the same
+                // window â€” retransmit the next unacked segment and stay in
+                // recovery rather than exiting early.
+                let recover = match &tcb.congestion_control {
+                    CongestionControl::Reno(r) => r.recover,
+                    CongestionControl::Cubic(c) => c.recover,
+                };
+                if (ack.wrapping_sub(recover) as i32) >= 0 {
+                    tcb.in_fast_recovery = false;
+                    tcb.cwnd = tcb.ssthresh;
+                    tcb.cwv.cwnd_raw = tcb.ssthresh;
+                    tcb.abc.clear_accumulators();
+                    log::trace!("TCP: Fast Recovery finished");
+                } else {
+                    // RFC 5681 / 6582: inflate relative to SMSS (TS may shrink it).
+                    let smss = tcb.effective_mss.max(1);
+                    tcb.cwnd = tcb.ssthresh + 3 * smss;
+                    tcb.cwv.cwnd_raw = tcb.cwnd;
+                    partial_retransmit_ack = Some(ack);
+                    log::trace!("TCP: Fast Recovery partial ACK (stay in recovery)");
+                }
+            }
+
+            let had_unacked_fin = tcb.retransmission_queue.iter().any(|s| s.is_fin());
+            let prior_state = tcb.state;
+
+            tcb.snd_una = ack;
+            tcb.duplicate_ack_count = 0;
+            tcb.last_ack_received = ack;
+
+            // Spurious-RTO detection: Eifel XOR F-RTO (before CC growth).
+            // Pass ECE into Eifel: RFC 3522 â€” congestion notification means the
+            // timeout was *not* spurious, so skip Eifel Response.
+            tcb.eifel.bytes_acked = ack.wrapping_sub(prev_snd_una);
+            let bytes_acked = tcb.eifel.bytes_acked;
+            if tcb.ts.enabled {
+                Self::eifel_on_acceptable_ack(&mut tcb, ts_opt.map(|(_, t)| t), ece);
+            } else {
+                Self::frto_on_ack(&mut tcb, ack, /*is_dup=*/ false);
+            }
+            // Advancing ACK always drains send queue below; that also covers
+            // the F-RTO Step2 never-sent data probe (RFC 5682).
+
+            // Dual RTT: always complete probe for CSV; feed estimators only
+            // when Timestamps are off (Karn / RFC 6298). With TS enabled,
+            // estimators were already updated from TSecr above.
+            if let Some(p) = tcb.rtt_m.probe {
+                if (ack.wrapping_sub(p.end) as i32) >= 0 {
+                    let r = Instant::now() - p.sent_at;
+                    tcb.rtt_m.probe = None;
+                    tcb.rtt_m.last_probe_sample = Some(r);
+                    if !tcb.ts.enabled {
+                        Self::update_rtt_estimators(&mut tcb, r);
+                    } else {
+                        log::trace!(
+                            "TCP RTT probe(compare)={:?} ts={:?}",
+                            r,
+                            tcb.rtt_m.last_ts_sample
+                        );
+                    }
+                }
+            }
+
+            // RFC 3465 ABC: pass newly ACKed byte count into SS/CA growth.
+            self.update_congestion_window(&mut tcb, bytes_acked);
+            ack_log = Some((
+                tcb.tuple,
+                ack,
+                prev_snd_una,
+                tcb.snd_una,
+                prev_snd_wnd,
+                tcb.snd_wnd,
+                prev_cwnd,
+                tcb.cwnd,
+            ));
+
+            // RFC 2018/6675/8985: fold in this ACK's SACK blocks *before*
+            // draining, since draining only retires segments the cumulative
+            // ACK fully covers â€” segments SACKed ahead of a hole are still
+            // in the queue and need `sack_tx_apply`/`sack_mark_lost` to see
+            // them. A cumulative ACK can itself expose a hole (e.g. the
+            // segment right after SND.UNA was lost while later ones were
+            // SACKed), so loss detection runs here too, not only on dupACKs.
+            if tcb.sack.enabled {
+                Self::sack_tx_apply(&mut tcb, ack, sack_blocks);
+                Self::sack_mark_lost(&mut tcb);
+                Self::rack_detect(&mut tcb);
+                if !tcb.in_fast_recovery && Self::sack_has_lost(&tcb) {
+                    Self::sack_enter_recovery(&mut tcb);
+                    tcb.in_fast_recovery = true;
+                    self.on_congestion_event(&mut tcb);
+                    fast_retransmit = true;
+                    log::info!(
+                        "TCP SACK/RACK: loss detected on advancing ACK, entering recovery {:?}",
+                        tcb.tuple
+                    );
+                }
+            }
+
+            self.drain_retransmission_queue(&mut tcb, ack);
+            run_send_queue = true;
+            // RFC 8985 §7.1: any forward progress on SND.UNA re-arms the
+            // Tail Loss Probe against whatever is left outstanding now.
+            Self::tlp_arm(&mut tcb);
+
+            // FIN handling: once our own FIN is ACKed, move along whichever
+            // branch of the close sequence we're on.
+            if had_unacked_fin && !tcb.retransmission_queue.iter().any(|s| s.is_fin()) {
+                match prior_state {
+                    TcpState::FinWait1 => {
+                        tcb.state = TcpState::FinWait2;
+                        log::trace!("TCP State: FinWait1 -> FinWait2 (FIN ACKed)");
+                    }
+                    TcpState::Closing => {
+                        tcb.state = TcpState::TimeWait;
+                        tcb.timewait_deadline = Some(Instant::now() + Duration::from_secs(120));
+                        log::trace!("TCP State: Closing -> TimeWait (FIN ACKed)");
+                    }
+                    TcpState::LastAck => {
+                        tcb.state = TcpState::Closed;
+                        tcb.event.notify();
+                        log::trace!("TCP State: LastAck -> Closed (FIN ACKed)");
+                    }
+                    _ => {}
+                }
+            }
+        } else if ack == tcb.snd_una && payload.is_empty() && !tcb.retransmission_queue.is_empty() {
+            // --- Duplicate ACK: the peer has nothing new to acknowledge --
+            // RFC 5681 §3.2: three duplicate ACKs for the same sequence
+            // number are taken as a probable loss signal, and we
+            // retransmit without waiting for the RTO timer to expire.
+            // Below three, or once already in recovery, this segment still
+            // gets ordinary receive-side handling (a duplicate ACK with an
+            // empty payload is otherwise unremarkable) -- only a segment
+            // that actually *triggers* fast retransmit or window inflation
+            // is treated as pure send-side signalling.
+            tcb.duplicate_ack_count += 1;
+            log::trace!(
+                "TCP: dup ACK {:?} ack={} count={}",
+                tcb.tuple,
+                ack,
+                tcb.duplicate_ack_count
+            );
+
+            if !tcb.ts.enabled {
+                Self::frto_on_ack(&mut tcb, ack, /*is_dup=*/ true);
+            }
+
+            // RFC 6675/8985: a duplicate ACK is exactly where fresh SACK
+            // information about the peer's receive-side scoreboard shows up,
+            // so update our sender-side scoreboard and re-run loss detection
+            // on every one, not only once we already suspect loss.
+            let sack_lost_now = if tcb.sack.enabled {
+                Self::sack_tx_apply(&mut tcb, ack, sack_blocks);
+                Self::sack_mark_lost(&mut tcb);
+                Self::rack_detect(&mut tcb);
+                Self::sack_has_lost(&tcb)
+            } else {
+                false
+            };
+
+            // RFC 5681 §3.2:
+            //   - exactly once on entering Fast Recovery (3rd dupACK, and not
+            //     already recovering): MD + Fast Retransmit;
+            //   - every *additional* dupACK while in recovery: inflate cwnd
+            //     by one SMSS (do NOT re-run MD / retransmit head again).
+            //
+            // Bug: `>= 3` alone stays true for dupACK 4,5,6â€¦ so each later
+            // dupACK re-entered the MD arm instead of the inflate arm.
+            //
+            // With SACK, RFC 6675/8985 let IsLost declare loss (and thus
+            // Fast Retransmit) *before* the classic 3-dupACK threshold is
+            // reached â€” it's direct evidence rather than an inferred count.
+            if !tcb.in_fast_recovery && (tcb.duplicate_ack_count >= 3 || sack_lost_now) {
+                log::trace!("TCP: 3x Dup ACK (or SACK/RACK loss) for SEQ {}", ack);
+                if tcb.sack.enabled {
+                    Self::sack_enter_recovery(&mut tcb);
+                }
+                tcb.in_fast_recovery = true;
+                self.on_congestion_event(&mut tcb);
+                fast_retransmit = true;
+                run_send_queue = true;
+            } else if tcb.in_fast_recovery {
+                // Each further duplicate ACK means one more packet has left
+                // the network, so there's room to put one more in flight
+                // (the "artificial window inflation" step of Fast Recovery).
+                let smss = tcb.effective_mss.max(1);
+                tcb.cwnd = tcb.cwnd.saturating_add(smss);
+                tcb.cwv.cwnd_raw = tcb.cwv.cwnd_raw.saturating_add(smss);
+                dup_recovery_inflate = true;
+                run_send_queue = true;
+            }
+        } else if ack < tcb.snd_una {
+            // Stale ACK for data we already retired â€” most likely a
+            // reordered duplicate. Not harmful, but worth an ACK to resync
+            // the peer on our real SND.UNA.
+            log::trace!(
+                "TCP: stale ACK {:?} ack={} snd_una={}",
+                tcb.tuple,
+                ack,
+                tcb.snd_una
+            );
+            send_ack = true;
+        }
+
+        // Look at the receive side of the segment (payload bytes / FIN),
+        // matching RFC 9293's own precondition: the ACK must be acceptable,
+        // and this can't be a segment that only exists to signal something
+        // about the send side (fast retransmit / window inflation).
+        let process_receive = ack_acceptable
+            && (!payload.is_empty()
+                || header.is_fin()
+                || (!send_ack && !fast_retransmit && !dup_recovery_inflate));
+
+        if process_receive {
+            if !tcb.is_segment_acceptable(seq, payload.len() as u32) {
+                // RFC 9293 §3.10.7.4: neither the first nor last byte falls
+                // in our receive window â€” outside what we're willing to
+                // buffer right now (already delivered, or too far ahead).
+                send_ack = true;
+            } else {
+                // RFC 9293 §3.10.7.4: gated window update (was unconditional).
+                tcb.maybe_update_send_window(seq, ack, header.window_size.get());
+                tcb.last_rx_time = Instant::now();
+                tcb.keepalive_count = 0;
+                tcb.keepalive_deadline = None;
+
+                if !payload.is_empty() {
+                    if seq != tcb.rcv_nxt {
+                        if tcb.sack.enabled {
+                            // RFC 2018 §5 / RFC 6675: with SACK we keep the
+                            // bytes instead of discarding them â€” write them
+                            // into the reassembly window in place and record
+                            // the range on the scoreboard so it (a) shows up
+                            // in our next outgoing SACK option and (b) folds
+                            // into RCV.NXT automatically once the hole in
+                            // front of it fills in.
+                            Self::sack_rx_ooo(&mut tcb, seq, payload);
+                            tcb.update_rcv_wnd_from_buffer();
+                        }
+                        // RFC 2018 §3 / RFC 5681: an out-of-order segment
+                        // must trigger an *immediate* duplicate ACK (never
+                        // delayed) so the sender's dupACK counter â€” and, with
+                        // SACK, its scoreboard â€” advances without waiting on
+                        // the 40ms delayed-ACK timer.
+                        send_ack = true;
+                    } else {
+                        // With SACK enabled, route the in-order write through
+                        // `write_at` (identical result to `write` when
+                        // `seq == rcv_nxt`, since the ring buffer's contiguous
+                        // prefix is exactly what `write` appends to) so the
+                        // very same helper serves both paths for the OOO
+                        // scoreboard bookkeeping below.
+                        let n = if tcb.sack.enabled {
+                            let rcv_nxt = tcb.rcv_nxt;
+                            tcb.receive_buffer.write_at(rcv_nxt, seq, payload)
+                        } else {
+                            tcb.receive_buffer.write(payload)
+                        };
+                        if n == 0 {
+                            // Receive buffer is full â€” nothing to do but
+                            // re-advertise the (zero) window.
+                            send_ack = true;
+                        } else {
+                            let old_rcv_nxt = tcb.rcv_nxt;
+                            tcb.rcv_nxt = tcb.rcv_nxt.wrapping_add(n as u32);
+                            if tcb.sack.enabled {
+                                // A previously out-of-order range may now be
+                                // exactly adjacent to the new RCV.NXT â€” fold
+                                // it into the contiguous prefix without an
+                                // extra copy (bytes are already in place).
+                                Self::sack_rx_advance_from_scoreboard(&mut tcb);
+                            }
+                            log::trace!(
+                                "TCP: RX data {:?} seq={} len={} stored={} rcv_nxt {} -> {}",
+                                tcb.tuple,
+                                seq,
+                                payload.len(),
+                                n,
+                                old_rcv_nxt,
+                                tcb.rcv_nxt
+                            );
+                            tcb.update_rcv_wnd_from_buffer();
+                            tcb.ack_needed = true;
+                            tcb.unacked_segments += 1;
+                        }
+                    }
+                } else if tcb.rcv_wnd == 0 {
+                    tcb.ack_needed = true;
+                    tcb.unacked_segments += 1;
+                }
+
+                if header.is_fin() {
+                    tcb.handle_fin_flag();
+                    tcb.ack_needed = true;
+                }
+
+                if tcb.ack_needed {
+                    // RFC 1122 §4.2.3.2: ACK immediately for PSH, FIN, a
+                    // zero window, or once two segments are outstanding;
+                    // otherwise coalesce ACKs for up to 40ms (delayed ACK).
+                    if header.get_flag(TcpDatagramHeader::PSH)
+                        || header.is_fin()
+                        || tcb.rcv_wnd == 0
+                        || tcb.unacked_segments >= 2
+                    {
+                        send_ack = true;
+                        tcb.ack_needed = false;
+                        tcb.unacked_segments = 0;
+                        tcb.ack_deadline = None;
+                    } else {
+                        tcb.ack_deadline = Some(Instant::now() + Duration::from_millis(40));
+                    }
+                }
+
+                if !payload.is_empty() || header.is_fin() {
+                    tcb.event.notify();
+                }
+
+                run_send_queue = true;
+            }
+        }
+
+        drop(tcb);
+
+        if let Some((tuple, ack, prev_snd_una, snd_una, prev_snd_wnd, snd_wnd, prev_cwnd, cwnd)) =
+            ack_log
+        {
+            log::trace!(
+                "TCP-ACK: {:?} ack={} snd_una {}->{} snd_wnd {}->{} cwnd {}->{}",
+                tuple,
+                ack,
+                prev_snd_una,
+                snd_una,
+                prev_snd_wnd,
+                snd_wnd,
+                prev_cwnd,
+                cwnd
+            );
+        }
+
+        // Fixed order: ACK first (settle the peer's view of our state),
+        // then retransmits, then anything of ours still waiting to go out.
+        if send_ack {
+            self.send_immediate_ack_unlocked(tcb_arc);
+        }
+        if fast_retransmit {
+            self.fast_retransmit_front(tcb_arc);
+        }
+        if let Some(ack) = partial_retransmit_ack {
+            self.retransmit_first_unacked(tcb_arc, ack);
+        }
+        if run_send_queue {
+            self.process_send_queue(tcb_arc.clone());
+        }
+    }
+
+    /// RFC 6298: update SRTT, RTTVAR and RTO from a fresh RTT sample `r`.
+    fn update_rtt_estimators(tcb: &mut TcpControlBlock, r: Duration) {
+        // RFC 8985 §7.4: RACK's reordering-window heuristic is keyed off the
+        // smallest RTT seen recently, independent of which estimator (Karn
+        // probe vs. Timestamp echo) produced this particular sample.
+        Self::rack_feed_rtt(tcb, r);
+
+        let r_ns = r.as_nanos();
+        let g = Duration::from_millis(10); // clock granularity
+
+        match (tcb.srtt, tcb.rttvar) {
+            (Some(srtt), Some(rttvar)) => {
+                // RTTVAR = (3/4)*RTTVAR + (1/4)*|SRTT - R|
+                // SRTT   = (7/8)*SRTT   + (1/8)*R
+                let s = srtt.as_nanos();
+                let v = rttvar.as_nanos();
+                let diff = if s > r_ns { s - r_ns } else { r_ns - s };
+                tcb.rttvar = Some(Duration::from_nanos((3 * v) / 4 + diff / 4));
+                tcb.srtt = Some(Duration::from_nanos((7 * s) / 8 + r_ns / 8));
+            }
+            _ => {
+                // First sample: RFC 6298 §2.2 seeds SRTT with R itself and
+                // RTTVAR with R/2.
+                tcb.srtt = Some(r);
+                tcb.rttvar = Some(Duration::from_nanos(r_ns / 2));
+            }
+        }
+
+        // RTO = SRTT + max(G, 4*RTTVAR), clamped to [1s, 60s].
+        let srtt = tcb.srtt.unwrap();
+        let rttvar = tcb.rttvar.unwrap();
+        let four_rttvar = Duration::from_nanos(rttvar.as_nanos().saturating_mul(4));
+        let base = if four_rttvar > g { four_rttvar } else { g };
+        let rto = Duration::from_nanos(srtt.as_nanos().saturating_add(base.as_nanos()));
+        tcb.rto = rto.max(Duration::from_secs(1)).min(Duration::from_secs(60));
+    }
+
+    /// Initiates or completes TCP connection teardown (RFC 9293 §3.5).
+    ///
+    /// Active close (Established / SynReceived) â†’ FIN-ACK â†’ FinWait1.
+    /// Passive close (CloseWait)                â†’ FIN-ACK â†’ LastAck.
+    pub fn close_connection(&self, tcb_arc: Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        let fin_to_send = {
+            let mut tcb = tcb_arc.write();
+            let now = Instant::now();
+
+            let (new_state, fin_seq) = match tcb.state {
+                TcpState::Established | TcpState::SynReceived => {
+                    log::trace!("TCP: Active Close for {:?}", tcb.tuple);
+                    (TcpState::FinWait1, tcb.snd_nxt)
+                }
+                TcpState::CloseWait => {
+                    log::trace!("TCP: Passive Close for {:?}", tcb.tuple);
+                    (TcpState::LastAck, tcb.snd_nxt)
+                }
+                s => {
+                    log::trace!("TCP: close() in state {:?} â€” ignored", s);
+                    return;
+                }
+            };
+
+            let mut fin_hdr = TcpDatagramHeader::new(&tcb);
+            fin_hdr.set_flag(TcpDatagramHeader::FIN, true);
+            fin_hdr.set_flag(TcpDatagramHeader::ACK, true);
+
+            let (opts, tsval) = Self::established_outgoing_options(&mut tcb);
+            let tos = Self::apply_outgoing_ecn(&mut tcb, &mut fin_hdr, &[]);
+            tcb.retransmission_queue.push_back(UnackedSegment {
+                seq: fin_seq,
+                data: Vec::new(),
+                // Don't persist CWR in the queue (one-shot via apply_outgoing_ecn).
+                flags: fin_hdr.flags & !TcpDatagramHeader::CWR,
+                send_time: now,
+                retries: 0,
+                first_tsval: tsval,
+                retransmit_tsval: None,
+                sacked: false,
+                lost: false,
+                xmit_mstamp: now,
+                retrans: false,
+            });
+
+            tcb.snd_nxt = tcb.snd_nxt.wrapping_add(1);
+            tcb.state = new_state;
+
+            (tcb.socket.clone(), fin_hdr, opts, tos)
+        };
+
+        let (socket, mut fin_hdr, opts, tos) = fin_to_send;
+        self.net_send_tcp_datagram_with_options(socket, &mut fin_hdr, &opts, &[], tos);
+    }
+
+    /// Buffers application data and triggers the send queue.
+    ///
+    /// Allowed in Established and CloseWait states only.
+    pub fn send_data(
+        &self,
+        tcb_arc: Arc<IrqGuardedRwLock<TcpControlBlock>>,
+        data: &[u8],
+    ) -> Result<(), TcpError> {
+        {
+            let mut tcb = tcb_arc.write();
+            if tcb.state != TcpState::Established && tcb.state != TcpState::CloseWait {
+                return Err(TcpError::NotConnected);
+            }
+            tcb.send_buffer.extend(data);
+        }
+
+        self.process_send_queue(tcb_arc);
+        Ok(())
+    }
+
+    /// Recompute pacing rate from `cwnd` / `srtt` and return the gap for
+    /// `send_len` bytes. Returns `None` if pacing is off or SRTT unknown.
+    fn pacing_gap_for(tcb: &mut TcpControlBlock, send_len: u32) -> Option<Duration> {
+        if !tcb.pacing.enabled || send_len == 0 {
+            return None;
+        }
+        let Some(srtt) = tcb.srtt else {
+            tcb.pacing.rate_bps = 0;
+            return None;
+        };
+        let srtt_ns = (srtt.as_nanos() as u128).max(1);
+        let cwnd = tcb.cwnd.max(1) as u128;
+        // Gain: 200% in Slow Start, 120% in CA (percent).
+        let gain: u128 = if tcb.cwnd < tcb.ssthresh { 200 } else { 120 };
+        // rate_Bps = cwnd * 1e9 * gain / (srtt_ns * 100)
+        let rate = (cwnd * 1_000_000_000u128 * gain) / (srtt_ns * 100);
+        let rate = rate.max(1) as u64;
+        tcb.pacing.rate_bps = rate;
+        // gap_ns = send_len * 1e9 / rate
+        let gap_ns = (send_len as u128 * 1_000_000_000u128) / rate as u128;
+        // Floor at 1 Âµs so we never spin; cap at RTO so a stall cannot freeze TX.
+        let gap = Duration::from_nanos(gap_ns.max(1_000) as u64).min(tcb.rto);
+        tcb.pacing.last_gap = gap;
+        Some(gap)
+    }
+
+    /// `true` if new-data TX must wait for `pacing.next_tx`.
+    fn pacing_should_hold(tcb: &mut TcpControlBlock, now: Instant) -> bool {
+        if !tcb.pacing.enabled {
+            return false;
+        }
+        // F-RTO Step2 probe must go out immediately.
+        if tcb.frto.phase == FrtoPhase::Step2 {
+            return false;
+        }
+        if let Some(next) = tcb.pacing.next_tx {
+            if now < next {
+                tcb.pacing.held_count = tcb.pacing.held_count.saturating_add(1);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Drains the send buffer into TCP segments (network_worker only).
+    ///
+    /// The TCB lock is dropped before each `net_send_tcp_datagram` call â€” and
+    /// before every log line â€” so the NIC driver and the logger (which takes
+    /// its own `serial` lock) never run while the TCB write lock is held.
+    fn process_send_queue(&self, tcb_arc: Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        loop {
+            let mut tcb = tcb_arc.write();
+            let tuple = tcb.tuple;
+
+            if tcb.send_buffer.is_empty() {
+                // Nothing queued: classic application-limited (RFC 7661 §4.1 / §4.3).
+                Self::cwv_note_app_limited(&mut tcb);
+                tcb.pacing.clear_deadline();
+                let (snd_una, snd_nxt, snd_wnd, cwnd, cwnd_raw) = (
+                    tcb.snd_una,
+                    tcb.snd_nxt,
+                    tcb.snd_wnd,
+                    tcb.cwnd,
+                    tcb.cwv.cwnd_raw,
+                );
+                drop(tcb);
+                log::trace!(
+                    "TCP-SEND: idle {:?} snd_una={} snd_nxt={} snd_wnd={} cwnd={} cwnd_no_cwv={}",
+                    tuple,
+                    snd_una,
+                    snd_nxt,
+                    snd_wnd,
+                    cwnd,
+                    cwnd_raw
+                );
+                return;
+            }
+
+            let now = Instant::now();
+            if Self::pacing_should_hold(&mut tcb, now) {
+                let next = tcb.pacing.next_tx;
+                drop(tcb);
+                log::trace!("TCP-SEND: pacing hold {:?} until={:?}", tuple, next);
+                return;
+            }
+
+            let in_flight = tcb.snd_nxt.wrapping_sub(tcb.snd_una);
+            // Always sample the pipe â€” even when we cannot send â€” so §4.2/§4.3
+            // reductions know how much we recently used (RFC 7661 FlightSize).
+            tcb.cwv.pipe_max = tcb.cwv.pipe_max.max(in_flight);
+            let mss = tcb.effective_mss as usize;
+
+            // RFC 9293 §3.7.4 (Nagle's algorithm): while data from us is
+            // still unacknowledged, hold small writes rather than sending
+            // them as their own tiny segment.
+            // F-RTO Step2 needs a never-sent probe segment (RFC 5682) â€” do not
+            // let Nagle suppress it.
+            let frto_probe = tcb.frto.phase == FrtoPhase::Step2;
+            if tcb.nagle_enabled && !frto_probe && in_flight > 0 && tcb.send_buffer.len() < mss {
+                // Nagle deliberately withholds a small write â€” still app-limited.
+                Self::cwv_note_app_limited(&mut tcb);
+                let buf_len = tcb.send_buffer.len();
+                drop(tcb);
+                log::trace!(
+                    "TCP-SEND: Nagle hold {:?} in_flight={} buf_len={} mss={}",
+                    tuple,
+                    in_flight,
+                    buf_len,
+                    mss
+                );
+                return;
+            }
+
+            let effective_wnd = tcb.snd_wnd.min(tcb.cwnd);
+            if effective_wnd <= in_flight || tcb.snd_wnd == 0 {
+                // Distinguish cwnd vs peer rwnd as the blocker (RFC 7661 §4.1).
+                if tcb.snd_wnd > in_flight && tcb.cwnd <= in_flight {
+                    Self::cwv_note_validated(&mut tcb);
+                } else {
+                    Self::cwv_note_app_limited(&mut tcb);
+                }
+                // Blocked by the receive window, the congestion window, or
+                // both. If it's a genuine zero window, arm the persist timer
+                // (RFC 9293 §3.8.6.1) so we probe periodically rather than
+                // waiting forever for a window update that might get lost.
+                if tcb.persist_timer.is_none() {
+                    tcb.persist_timer = Some(Instant::now() + Duration::from_millis(50));
+                    tcb.persist_backoff = Duration::from_millis(50);
+                }
+                let (snd_una, snd_nxt, snd_wnd, cwnd, cwnd_raw) = (
+                    tcb.snd_una,
+                    tcb.snd_nxt,
+                    tcb.snd_wnd,
+                    tcb.cwnd,
+                    tcb.cwv.cwnd_raw,
+                );
+                drop(tcb);
+                log::trace!(
+                    "TCP-SEND: blocked by window {:?} snd_una={} snd_nxt={} snd_wnd={} cwnd={} cwnd_no_cwv={} in_flight={} eff_wnd={}",
+                    tuple,
+                    snd_una,
+                    snd_nxt,
+                    snd_wnd,
+                    cwnd,
+                    cwnd_raw,
+                    in_flight,
+                    effective_wnd
+                );
+                return;
+            }
+            tcb.persist_timer = None;
+
+            let window_remaining = effective_wnd.saturating_sub(in_flight);
+            let send_len = tcb
+                .send_buffer
+                .len()
+                .min(window_remaining as usize)
+                .min(mss);
+
+            if send_len == 0 {
+                let buf_len = tcb.send_buffer.len();
+                drop(tcb);
+                log::trace!(
+                    "TCP-SEND: zero send_len {:?} buf_len={} window_remaining={} mss={}",
+                    tuple,
+                    buf_len,
+                    window_remaining,
+                    mss
+                );
+                return;
+            }
+
+            let data: Vec<u8> = tcb.send_buffer.drain(..send_len).collect();
+
+            let mut hdr = TcpDatagramHeader::new(&tcb);
+            hdr.set_flag(TcpDatagramHeader::ACK, true);
+            hdr.set_flag(TcpDatagramHeader::PSH, true);
+            hdr.set_sequence_number(tcb.snd_nxt);
+
+            let (opts, tsval) = Self::established_outgoing_options(&mut tcb);
+            let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &data);
+            if tcb.rtt_m.probe.is_none() {
+                let end = tcb.snd_nxt.wrapping_add(data.len() as u32);
+                tcb.rtt_m.probe = Some(RttProbe {
+                    seq: tcb.snd_nxt,
+                    end,
+                    sent_at: Instant::now(),
+                    tsval,
+                });
+            }
+            let nxt = tcb.snd_nxt;
+
+            let flight_after = in_flight.saturating_add(send_len as u32);
+            tcb.cwv.pipe_max = tcb.cwv.pipe_max.max(flight_after);
+            tcb.cwv.last_data_tx = Instant::now();
+            tcb.cwv.app_limited_since = None;
+            if flight_after >= tcb.cwnd && tcb.cwnd <= tcb.snd_wnd {
+                Self::cwv_note_validated(&mut tcb);
+            }
+
+            let xmit_now = Instant::now();
+            tcb.retransmission_queue.push_back(UnackedSegment {
+                seq: nxt,
+                data: data.clone(),
+                flags: hdr.flags & !TcpDatagramHeader::CWR,
+                send_time: xmit_now,
+                retries: 0,
+                first_tsval: tsval,
+                retransmit_tsval: None,
+                sacked: false,
+                lost: false,
+                xmit_mstamp: xmit_now,
+                retrans: false,
+            });
+            tcb.snd_nxt = tcb.snd_nxt.wrapping_add(send_len as u32);
+            // RFC 8985 §7.1: (re)arm the Tail Loss Probe on every new-data
+            // transmission â€” TLP fires only when no further ACK/data event
+            // preempts it before one probe-timeout elapses.
+            Self::tlp_arm(&mut tcb);
+
+            // Schedule the next new-data segment (spread cwnd over SRTT).
+            if let Some(gap) = Self::pacing_gap_for(&mut tcb, send_len as u32) {
+                tcb.pacing.next_tx = Some(Instant::now() + gap);
+                tcb.pacing.paced_count = tcb.pacing.paced_count.saturating_add(1);
+            } else {
+                tcb.pacing.clear_deadline();
+            }
+
+            let socket = tcb.socket.clone();
+            drop(tcb);
+
+            self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &data, tos);
+        }
+    }
+
+    /// Demultiplexes an incoming TCP segment to the appropriate handler.
+    ///
+    /// `ip_ecn` is the IPv4 TOS low 2 bits (RFC 3168 §5):
+    ///   00 Not-ECT | 01 ECT(1) | 10 ECT(0) | 11 CE
+    pub fn process_data(
+        &self,
+        sender_ip: Ipv4Addr,
+        target_ip: Ipv4Addr,
+        buffer: &mut PacketBuffer,
+        nic: NetworkInterfaceId,
+        ip_ecn: u8,
+    ) -> Result<(), ()> {
+        let frame_len = buffer.frame().len();
+
+        let local_ip = kernel_ref()
+            .network_subsystem()
+            .interfaces()
+            .get(nic)
+            .ok_or(())?
+            .local_internet_address
+            .unwrap_or(Ipv4Addr::unspecified());
+
+        {
+            let frame = buffer.payload_mut();
+            if frame.len() < 20 {
+                return Err(());
+            }
+
+            let (hdr, _) = TcpDatagramHeader::read_from_prefix(frame).map_err(|_| ())?;
+            let hdr_len = hdr.header_len_bytes();
+            if frame.len() < hdr_len {
+                return Err(());
+            }
+
+            let wire_csum = hdr.checksum.get();
+            frame[16] = 0;
+            frame[17] = 0;
+            let computed = self.calculate_tcp_checksum(
+                sender_ip.octets(),
+                target_ip.octets(),
+                &frame[..hdr_len],
+                &frame[hdr_len..],
+            );
+            frame[16] = (wire_csum >> 8) as u8;
+            frame[17] = wire_csum as u8;
+            if computed != wire_csum {
+                log::warn!(
+                    "TCP: bad checksum {}:{} -> {}:{} flags=0x{:02x} seq={} ack={} wire=0x{:04x} calc=0x{:04x} iface_ip={}",
+                    sender_ip,
+                    hdr.source_port.get(),
+                    target_ip,
+                    hdr.dest_port.get(),
+                    hdr.flags,
+                    hdr.sequence_number.get(),
+                    hdr.ack_number.get(),
+                    wire_csum,
+                    computed,
+                    local_ip
+                );
+                return Ok(());
+            }
+
+            let options = &frame[20..hdr_len];
+            let payload = &frame[hdr_len..];
+
+            let tuple = ConnectionTuple {
+                local_ip: target_ip,
+                local_port: hdr.dest_port.get(),
+                remote_ip: sender_ip,
+                remote_port: hdr.source_port.get(),
+            };
+
+            // Look up TCB without holding the lock during dispatch.
+            let tcb_arc = self.connections.read().get(&tuple).cloned();
+
+            if let Some(tcb_arc) = tcb_arc {
+                let state = tcb_arc.read().state;
+                if hdr.is_syn() || hdr.is_ack() || hdr.is_rst() || hdr.is_fin() {
+                    log::trace!(
+                        "TCP: RX {:?} state={:?} flags=0x{:02x} seq={} ack={} len={}",
+                        tuple,
+                        state,
+                        hdr.flags,
+                        hdr.sequence_number.get(),
+                        hdr.ack_number.get(),
+                        payload.len()
+                    );
+                }
+
+                match state {
+                    TcpState::SynSent => {
+                        if hdr.is_rst() {
+                            log::info!(
+                                "TCP: RST during connect {:?} flags=0x{:02x}",
+                                tuple,
+                                hdr.flags
+                            );
+                            self.abort_connection(tuple, TcpError::ConnectionReset);
+                        } else if hdr.is_syn() && hdr.is_ack() {
+                            self.process_syn_ack(&tcb_arc, &hdr, options);
+                        }
+                    }
+                    TcpState::SynReceived => {
+                        self.process_syn_received_ack(&tcb_arc, &hdr, payload, options, ip_ecn);
+                    }
+                    TcpState::Established => {
+                        // If our handshake ACK was lost, the peer may re-send its
+                        // SYN-ACK; process_syn_ack's Established branch answers
+                        // it with another ACK regardless of whether this is the
+                        // first or a later retransmit.
+                        if hdr.is_syn() && hdr.is_ack() {
+                            self.process_syn_ack(&tcb_arc, &hdr, options);
+                        } else {
+                            self.process_data_datagram(payload, &hdr, options, &tcb_arc, ip_ecn);
+                        }
+                    }
+                    TcpState::FinWait1
+                    | TcpState::FinWait2
+                    | TcpState::CloseWait
+                    | TcpState::Closing
+                    | TcpState::LastAck => {
+                        self.process_data_datagram(payload, &hdr, options, &tcb_arc, ip_ecn);
+                    }
+                    TcpState::TimeWait => {
+                        if hdr.is_fin() {
+                            tcb_arc.write().timewait_deadline =
+                                Some(Instant::now() + Duration::from_secs(120));
+                            self.send_immediate_ack_unlocked(&tcb_arc);
+                        }
+                    }
+                    _ => {}
+                }
+            } else {
+                if hdr.is_rst() {
+                    return Ok(());
+                }
+
+                log::warn!(
+                    "TCP: no TCB for {}:{} -> {}:{} flags=0x{:02x} seq={} ack={} len={}",
+                    sender_ip,
+                    hdr.source_port.get(),
+                    local_ip,
+                    hdr.dest_port.get(),
+                    hdr.flags,
+                    hdr.sequence_number.get(),
+                    hdr.ack_number.get(),
+                    payload.len()
+                );
+
+                if hdr.is_syn() && !hdr.is_ack() {
+                    self.process_passive_syn(tuple, &hdr, options, nic);
+                } else {
+                    self.send_standalone_rst(tuple, &hdr, nic);
+                }
+            }
+        }
+
+        buffer.consume_bytes(frame_len);
+        Ok(())
+    }
+
+    /// Sends a stateless RST segment (RFC 9293 §3.10.7.1).
+    fn send_standalone_rst(
+        &self,
+        tuple: ConnectionTuple,
+        received_hdr: &TcpDatagramHeader,
+        nic: NetworkInterfaceId,
+    ) {
+        let (seq, ack, flags) = if received_hdr.is_ack() {
+            (received_hdr.ack_number.get(), 0, TcpDatagramHeader::RST)
+        } else {
+            let a = received_hdr.sequence_number.get().wrapping_add(1);
+            (0, a, TcpDatagramHeader::RST | TcpDatagramHeader::ACK)
+        };
+
+        let socket = Socket {
+            remote_port: tuple.remote_port,
+            local_port: tuple.local_port,
+            remote_address: tuple.remote_ip,
+            local_address: tuple.local_ip,
+            nic,
+        };
+
+        let mut rst_hdr = TcpDatagramHeader {
+            source_port: U16::new(tuple.local_port),
+            dest_port: U16::new(tuple.remote_port),
+            sequence_number: U32::new(seq),
+            ack_number: U32::new(ack),
+            offset_res: 5 << 4,
+            flags,
+            window_size: U16::new(0),
+            checksum: U16::new(0),
+            urgent_pointer: U16::new(0),
+        };
+
+        self.net_send_tcp_datagram(socket, &mut rst_hdr, &[]);
+    }
+
+    /// Removes all segments fully covered by `ack` from the retransmission queue.
+    fn drain_retransmission_queue(&self, tcb: &mut TcpControlBlock, ack: u32) {
+        tcb.retransmission_queue
+            .retain(|seg| (ack.wrapping_sub(seg.end_seq()) as i32) < 0);
+    }
+
+    /// Sends RST to all active connections and transitions them to Closed.
+    pub fn terminate_all_connections(&self) {
+        let connections: Vec<_> = self.connections.read().values().cloned().collect();
+
+        for tcb_arc in connections {
+            let packet = {
+                let mut tcb = tcb_arc.write();
+                if tcb.state == TcpState::Closed {
+                    None
+                } else {
+                    let mut hdr = TcpDatagramHeader::new(&tcb);
+                    hdr.set_flag(TcpDatagramHeader::RST, true);
+                    hdr.set_flag(TcpDatagramHeader::ACK, true);
+                    let socket = tcb.socket.clone();
+                    tcb.state = TcpState::Closed;
+                    tcb.event.notify();
+                    Some((socket, hdr))
+                }
+            };
+
+            if let Some((socket, mut hdr)) = packet {
+                self.net_send_tcp_datagram(socket, &mut hdr, &[]);
+            }
+        }
+    }
+
+    /// Sends a window-update ACK if the new window is large enough to avoid
+    /// Silly Window Syndrome (RFC 1122 / RFC 9293).
+    pub fn trigger_window_update(&self, tcb_arc: Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        let packet = {
+            let mut tcb = tcb_arc.write();
+            let new_wnd = tcb.effective_rcv_wnd().min(u16::MAX as u32) as u16;
+            let old_wnd = tcb.rcv_wnd;
+
+            if new_wnd <= old_wnd {
+                None
+            } else {
+                let cap = tcb.receive_buffer.capacity() as u16;
+                let inc = new_wnd - old_wnd;
+                if inc < MSS as u16 && new_wnd < cap / 2 && old_wnd != 0 {
+                    None
+                } else {
+                    tcb.rcv_wnd = new_wnd;
+                    let socket = tcb.socket.clone();
+                    let mut hdr = TcpDatagramHeader::new(&tcb);
+                    hdr.set_flag(TcpDatagramHeader::ACK, true);
+                    hdr.set_sequence_number(tcb.snd_nxt);
+                    let (opts, _) = Self::established_outgoing_options(&mut tcb);
+                    let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &[]);
+                    Some((socket, hdr, opts, tos))
+                }
+            }
+        };
+
+        if let Some((socket, mut hdr, opts, tos)) = packet {
+            self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &[], tos);
+        }
+    }
+
+    /// Congestion window update on new ACK (Slow Start + CUBIC / Reno CA).
+    ///
+    /// Growth uses **RFC 3465 Appropriate Byte Counting** (always on): the
+    /// increase is a function of `bytes_acked` (SND.UNA advance), not merely
+    /// â€śone ACK â‡’ one SMSSâ€ť. See [`AbcState`] and [`TcpDriver::grow_cwnd_value`].
+    ///
+    /// RFC 5681 Slow Start still applies below `ssthresh`; above it CUBIC /
+    /// Reno CA run with an ABC-derived Reno floor.
+    ///
+    /// When RFC 7661 New CWV is enabled (`tcb.cwv.enabled`), real `cwnd`
+    /// growth is gated; `cwnd_raw` always receives unrestricted ABC increases
+    /// so logs can compare both.
+    fn update_congestion_window(&self, tcb: &mut TcpControlBlock, bytes_acked: u32) {
+        if tcb.in_fast_recovery {
+            return;
+        }
+
+        // Shadow window: always apply ABC SS/CA (no RFC 7661 gating).
+        self.grow_cwnd_value(tcb, true, bytes_acked);
+
+        if !tcb.cwv.enabled {
+            tcb.cwnd = tcb.cwv.cwnd_raw;
+            log::trace!("TCP CWV off: cwnd=cwnd_no_cwv={} {:?}", tcb.cwnd, tcb.tuple);
+            return;
+        }
+
+        // â”€â”€ RFC 7661 New CWV gate (before any real SS/CA increase) â”€â”€â”€â”€â”€â”€â”€â”€
+        let now = Instant::now();
+
+        // §4.2 Idle: no new data for > RTO â†’ validate cwnd down toward pipe.
+        if now - tcb.cwv.last_data_tx > tcb.rto {
+            Self::cwv_reduce_cwnd(tcb, CwvReduceReason::Idle);
+        }
+
+        // §4.3 Prolonged application-limited: same reduction on an RTO timer.
+        if let Some(since) = tcb.cwv.app_limited_since {
+            if now - since >= tcb.rto {
+                Self::cwv_reduce_cwnd(tcb, CwvReduceReason::AppLimited);
+                tcb.cwv.app_limited_since = Some(now);
+            }
+        }
+
+        // §4.1 MUST NOT increase while not validated (application-limited).
+        // Do not advance real abc.ca_accum â€” bytes were only applied to the
+        // shadow path above (RFC 7661 + RFC 3465 interaction).
+        if !tcb.cwv.validated {
+            tcb.cwv.no_increase = tcb.cwv.no_increase.saturating_add(1);
+            log::trace!(
+                "TCP CWV §4.1 no-increase: cwnd={} cwnd_no_cwv={} pipe_max={} {:?}",
+                tcb.cwnd,
+                tcb.cwv.cwnd_raw,
+                tcb.cwv.pipe_max,
+                tcb.tuple
+            );
+            return;
+        }
+
+        // Consume this validation credit for one growth sample (per-window).
+        tcb.cwv.validated = false;
+        tcb.cwv.pipe_max = 0;
+
+        self.grow_cwnd_value(tcb, false, bytes_acked);
+        log::trace!(
+            "TCP CWV+ABC grow: cwnd={} cwnd_no_cwv={} bytes_acked={} {:?}",
+            tcb.cwnd,
+            tcb.cwv.cwnd_raw,
+            bytes_acked,
+            tcb.tuple
+        );
+    }
+
+    /// Grow `cwnd` or `cwnd_raw` using RFC 3465 Appropriate Byte Counting.
+    ///
+    /// `bytes_acked` is the SND.UNA advance for this ACK (0 â†’ no-op).
+    ///
+    /// Slow start (§2.1): `cwnd += min(bytes_acked, LÂ·SMSS)` with L=2.
+    /// Congestion avoidance (§2.2): accumulate bytes until a full `cwnd` of
+    /// delivery has been ACKed, then open by one SMSS (Reno floor). CUBIC
+    /// may take `max(W_cubic(t), reno_abc)` but is still paced â‰¤1 SMSS/ACK.
+    fn grow_cwnd_value(&self, tcb: &mut TcpControlBlock, raw: bool, bytes_acked: u32) {
+        if bytes_acked == 0 {
+            return;
+        }
+
+        let ssthresh = tcb.ssthresh;
+        let smss = tcb.effective_mss.max(1);
+        let l_bytes = smss.saturating_mul(tcb.abc.l_smss as u32);
+
+        let cwnd_now = if raw { tcb.cwv.cwnd_raw } else { tcb.cwnd };
+
+        if cwnd_now < ssthresh {
+            // RFC 3465 §2.1 â€” Slow Start byte counting with L cap.
+            let credit = bytes_acked.min(l_bytes);
+            if credit < bytes_acked {
+                tcb.abc.ss_capped = tcb.abc.ss_capped.saturating_add(1);
+            }
+            if raw {
+                tcb.cwv.cwnd_raw = tcb.cwv.cwnd_raw.saturating_add(credit);
+            } else {
+                tcb.cwnd = tcb.cwnd.saturating_add(credit);
+            }
+            tcb.abc.bytes_credited = tcb.abc.bytes_credited.saturating_add(credit as u64);
+            log::trace!(
+                "TCP ABC §2.1 SS: +{} (acked={}, LÂ·SMSS={}) cwnd={} cwnd_no_cwv={} {:?}",
+                credit,
+                bytes_acked,
+                l_bytes,
+                tcb.cwnd,
+                tcb.cwv.cwnd_raw,
+                tcb.tuple
+            );
+            return;
+        }
+
+        // RFC 3465 §2.2 â€” Congestion Avoidance byte accumulator.
+        if raw {
+            tcb.abc.ca_accum_raw = tcb.abc.ca_accum_raw.saturating_add(bytes_acked);
+        } else {
+            tcb.abc.ca_accum = tcb.abc.ca_accum.saturating_add(bytes_acked);
+        }
+        tcb.abc.bytes_credited = tcb.abc.bytes_credited.saturating_add(bytes_acked as u64);
+
+        let mut reno_wnd = if raw { tcb.cwv.cwnd_raw } else { tcb.cwnd };
+        loop {
+            let accum = if raw {
+                tcb.abc.ca_accum_raw
+            } else {
+                tcb.abc.ca_accum
+            };
+            if reno_wnd == 0 || accum < reno_wnd {
+                break;
+            }
+            if raw {
+                tcb.abc.ca_accum_raw -= reno_wnd;
+            } else {
+                tcb.abc.ca_accum -= reno_wnd;
+            }
+            reno_wnd = reno_wnd.saturating_add(smss);
+            tcb.abc.ca_increments = tcb.abc.ca_increments.saturating_add(1);
+        }
+
+        match &tcb.congestion_control {
+            CongestionControl::Cubic(cubic) => {
+                let elapsed = Instant::now() - cubic.epoch_start;
+                let cubic_target = self.calculate_cubic_window(cubic, elapsed);
+                let target = cubic_target.max(reno_wnd);
+                let cwnd = if raw {
+                    &mut tcb.cwv.cwnd_raw
+                } else {
+                    &mut tcb.cwnd
+                };
+                if target > *cwnd {
+                    let inc = (target - *cwnd).min(smss);
+                    *cwnd = cwnd.saturating_add(inc);
+                } else {
+                    *cwnd = reno_wnd;
+                }
+            }
+            CongestionControl::Reno(_) => {
+                if raw {
+                    tcb.cwv.cwnd_raw = reno_wnd;
+                } else {
+                    tcb.cwnd = reno_wnd;
+                }
+            }
+        }
+    }
+
+    /// Mark the connection as using its congestion window (RFC 7661 §4.1).
+    fn cwv_note_validated(tcb: &mut TcpControlBlock) {
+        if !tcb.cwv.enabled {
+            return;
+        }
+        tcb.cwv.validated = true;
+        tcb.cwv.app_limited_since = None;
+    }
+
+    /// Mark application- / non-cwnd-limited; start §4.3 streak if needed.
+    fn cwv_note_app_limited(tcb: &mut TcpControlBlock) {
+        if !tcb.cwv.enabled {
+            return;
+        }
+        tcb.cwv.validated = false;
+        if tcb.cwv.app_limited_since.is_none() {
+            tcb.cwv.app_limited_since = Some(Instant::now());
+        }
+    }
+
+    /// RFC 7661 §4.2 / §4.3 â€” reduce an unvalidated cwnd toward the pipe.
+    ///
+    /// Does **not** touch `cwnd_raw` so the shadow window keeps showing what
+    /// classic TCP would have done without validation.
+    fn cwv_reduce_cwnd(tcb: &mut TcpControlBlock, reason: CwvReduceReason) {
+        let pipe = tcb.cwv.pipe_max.max(tcb.flight_size_bytes());
+        let floor = (2 * tcb.effective_mss).max(1);
+        let target = pipe.max(floor);
+
+        if tcb.cwnd > target {
+            tcb.cwnd = target;
+            if tcb.ssthresh < tcb.cwnd {
+                tcb.ssthresh = tcb.cwnd;
+            }
+            match reason {
+                CwvReduceReason::Idle => {
+                    tcb.cwv.idle_reduce = tcb.cwv.idle_reduce.saturating_add(1);
+                    log::info!(
+                        "TCP CWV §4.2 idle reduce: cwnd={} cwnd_no_cwv={} pipe={} {:?}",
+                        tcb.cwnd,
+                        tcb.cwv.cwnd_raw,
+                        pipe,
+                        tcb.tuple
+                    );
+                }
+                CwvReduceReason::AppLimited => {
+                    tcb.cwv.applim_reduce = tcb.cwv.applim_reduce.saturating_add(1);
+                    log::info!(
+                        "TCP CWV §4.3 app-limited reduce: cwnd={} cwnd_no_cwv={} pipe={} {:?}",
+                        tcb.cwnd,
+                        tcb.cwv.cwnd_raw,
+                        pipe,
+                        tcb.tuple
+                    );
+                }
+            }
+        }
+        tcb.cwv.pipe_max = pipe;
+    }
+
+    /// Multiplicative decrease on congestion event (RFC 8312 / RFC 5681).
+    ///
+    /// For CUBIC this also records `w_max` (the window size where the loss
+    /// happened) and precomputes `K`, the time offset at which the cubic
+    /// curve returns to `w_max` â€” see [`CubicState`] for the full formula.
+    ///
+    /// The shadow `cwnd_raw` is reduced in parallel so loss events do not
+    /// leave the comparison window stuck at a pre-loss fantasy size.
+    fn on_congestion_event(&self, tcb: &mut TcpControlBlock) {
+        // RFC 6675 §4 / RFC 8985: with SACK, `pipe` (bytes actually in
+        // flight, i.e. neither cumulatively ACKed, SACKed, nor marked lost)
+        // is a tighter loss-window estimate than the raw SND.NXT-SND.UNA
+        // span, which still counts holes and already-SACKed bytes.
+        let flight = if tcb.sack.enabled {
+            Self::sack_pipe_bytes(tcb)
+        } else {
+            tcb.flight_size_bytes()
+        };
+        let smss = tcb.effective_mss.max(1);
+        match tcb.congestion_control {
+            CongestionControl::Cubic(ref mut cubic) => {
+                cubic.epoch_start = Instant::now();
+                let prev = cubic.last_max_cwnd;
+                cubic.last_max_cwnd = tcb.cwnd;
+                // RFC 8312 §4.6 "Fast Convergence": if we're losing at a
+                // smaller window than last time, some other flow is
+                // probably taking more than its share â€” remember a lower
+                // w_max so we back off further and yield bandwidth faster.
+                cubic.w_max = if tcb.cwnd < prev {
+                    (tcb.cwnd * 9) / 10
+                } else {
+                    tcb.cwnd
+                };
+
+                tcb.ssthresh = ((tcb.cwnd as u64 * cubic.beta as u64) >> 10) as u32;
+                tcb.cwnd = tcb.ssthresh + 3 * smss;
+                // Parallel MD on the no-CWV shadow from its own value.
+                let raw_ss = ((tcb.cwv.cwnd_raw as u64 * cubic.beta as u64) >> 10) as u32;
+                tcb.cwv.cwnd_raw = raw_ss.saturating_add(3 * smss);
+                cubic.recover = tcb.snd_nxt;
+
+                // K = cbrt(W_max*(1-beta)/C), computed here so future calls
+                // to calculate_cubic_window don't need to redo it per-packet.
+                let diff = cubic.w_max.saturating_sub(tcb.cwnd) as f64;
+                let c = (cubic.c as f64) / 1024.0;
+                let k_s = if diff > 0.0 && c > 0.0 {
+                    libm::cbrt(diff / c)
+                } else {
+                    0.0
+                };
+                cubic.k_ns = (k_s * 1_000_000_000.0) as u64;
+            }
+            CongestionControl::Reno(ref mut reno) => {
+                tcb.ssthresh = (flight / 2).max(2 * smss);
+                tcb.cwnd = tcb.ssthresh + 3 * smss;
+                tcb.cwv.cwnd_raw = (tcb.cwv.cwnd_raw / 2)
+                    .max(2 * smss)
+                    .saturating_add(3 * smss);
+                reno.recover = tcb.snd_nxt;
+            }
+        }
+        log::trace!(
+            "TCP MD: cwnd={} cwnd_no_cwv={} ssthresh={} {:?}",
+            tcb.cwnd,
+            tcb.cwv.cwnd_raw,
+            tcb.ssthresh,
+            tcb.tuple
+        );
+        tcb.abc.clear_accumulators();
+    }
+
+    /// CUBIC window target at time `elapsed` since the last congestion
+    /// event: `W(t) = C*(t-K)^3 + W_max` (RFC 8312 §4.1). See [`CubicState`]
+    /// for what each term represents.
+    fn calculate_cubic_window(&self, cubic: &CubicState, elapsed: Duration) -> u32 {
+        let t = (elapsed.as_nanos() as f64) / 1e9;
+        let k = (cubic.k_ns as f64) / 1e9;
+        let c = (cubic.c as f64) / 1024.0;
+        let diff = t - k;
+        let w = c * (diff * diff * diff) + cubic.w_max as f64;
+        if w.is_nan() || w < 0.0 {
+            cubic.w_max
+        } else {
+            w as u32
+        }
+    }
+
+    /// Checks the head of the retransmission queue for RTO expiry.
+    ///
+    /// Returns `true` if the segment should be retransmitted now.
+    /// Applies exponential backoff and closes the connection after 5 failures.
+    fn tick_retransmission_timer(&self, tcb: &mut TcpControlBlock) -> bool {
+        if tcb.state == TcpState::Closed {
+            return false;
+        }
+
+        let now = Instant::now();
+        let flight = tcb.flight_size_bytes();
+
+        let (seq, rto_retrans_end, send_time, retries) = {
+            let Some(seg) = tcb.retransmission_queue.front() else {
+                return false;
+            };
+            (seg.seq, seg.end_seq(), seg.send_time, seg.retries)
+        };
+
+        if now - send_time < tcb.rto {
+            return false;
+        }
+
+        if retries >= 5 {
+            tcb.state = TcpState::Closed;
+            tcb.last_error = Some(TcpError::Timeout);
+            tcb.event.notify();
+            return false;
+        }
+
+        // Nested RTO during F-RTO (RFC 5682): abort F-RTO as â€śnot spuriousâ€ť
+        // and fall through into conventional MD + head retransmit. Do not
+        // re-arm F-RTO for this timeout â€” a second timeout means real loss.
+        let frto_nested_abort = !tcb.ts.enabled && tcb.frto.phase != FrtoPhase::Idle;
+        if frto_nested_abort {
+            tcb.frto.declared_loss_count = tcb.frto.declared_loss_count.saturating_add(1);
+            tcb.frto.clear();
+            log::info!(
+                "TCP F-RTO: nested RTO â†’ abort, conventional recovery {:?}",
+                tcb.tuple
+            );
+        }
+
+        if let Some(seg) = tcb.retransmission_queue.front_mut() {
+            seg.send_time = now;
+            seg.retries += 1;
+        }
+
+        tcb.in_fast_recovery = false;
+        tcb.duplicate_ack_count = 0;
+
+        // â”€â”€ Arm spurious detector: Eifel if TS, else F-RTO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+        if tcb.ts.enabled {
+            Self::eifel_on_rto_before_md(tcb);
+        } else if !frto_nested_abort {
+            Self::frto_on_rto(tcb, rto_retrans_end);
+        } else {
+            Self::eifel_clear_pending(tcb);
+        }
+
+        // RFC 5681 §3.1: an RTO means the loss detection we rely on
+        // elsewhere (duplicate ACKs) has itself failed, so treat it as a
+        // full loss episode â€” reset to one SMSS and re-enter Slow Start,
+        // rather than merely halving the window like Fast Recovery does.
+        let smss = tcb.effective_mss.max(1);
+        match tcb.congestion_control {
+            CongestionControl::Cubic(ref mut cubic) => {
+                let beta = cubic.beta as u64;
+                let ss = ((flight as u64 * beta) >> 10) as u32;
+                tcb.ssthresh = ss.max(2 * smss);
+                tcb.cwnd = smss;
+                tcb.cwv.cwnd_raw = smss;
+                cubic.epoch_start = Instant::now();
+                cubic.k_ns = 0;
+                cubic.w_max = tcb.ssthresh;
+                cubic.last_max_cwnd = tcb.ssthresh;
+                cubic.recover = 0;
+            }
+            CongestionControl::Reno(ref mut reno) => {
+                tcb.ssthresh = (flight / 2).max(2 * smss);
+                tcb.cwnd = smss;
+                tcb.cwv.cwnd_raw = smss;
+                reno.recover = 0;
+            }
+        }
+        tcb.abc.clear_accumulators();
+
+        // RFC 6298 §5.5: exponential backoff, capped at 60s.
+        let doubled = Duration::from_nanos(tcb.rto.as_nanos().saturating_mul(2));
+        tcb.rto = doubled.min(Duration::from_secs(60));
+
+        if let Some(p) = tcb.rtt_m.probe {
+            if p.seq == seq {
+                tcb.rtt_m.probe = None;
+            }
+        }
+
+        true
+    }
+
+    /// Background timer thread: retransmission, zero-window probing, delayed
+    /// ACKs, keepalives, and TIME-WAIT expiry.
+    pub fn tcp_timer_thread(&self) -> ! {
+        log::info!("TCP: Timer thread started");
+
+        loop {
+            let now = Instant::now();
+
+            let tcb_list: Vec<_> = self.connections.read().values().cloned().collect();
+            let mut remove_tuples = Vec::new();
+
+            for tcb_arc in &tcb_list {
+                let retransmit;
+                let mut window_probe = false;
+                let keepalive;
+                let mut delayed_ack = false;
+                let mut pacing_release = false;
+                let mut tlp_fire = false;
+
+                {
+                    let Some(mut tcb) = tcb_arc.try_write() else {
+                        continue;
+                    };
+
+                    if tcb.state == TcpState::Closed {
+                        remove_tuples.push(tcb.tuple);
+                        continue;
+                    }
+
+                    retransmit = self.tick_retransmission_timer(&mut tcb);
+
+                    // RFC 8985 §7.1 Tail Loss Probe: only check the PTO once
+                    // the RTO path above has had first refusal â€” an actual
+                    // RTO already resets recovery state and retransmits the
+                    // head, so a TLP firing in the same tick would be
+                    // redundant (and would race the RTO's own cwnd/ssthresh
+                    // updates in `tick_retransmission_timer`).
+                    if !retransmit {
+                        if let Some(deadline) = tcb.sack.tlp_deadline {
+                            if now >= deadline {
+                                tlp_fire = true;
+                                tcb.sack.tlp_deadline = None;
+                            }
+                        }
+                    }
+
+                    if let Some(deadline) = tcb.persist_timer {
+                        if now >= deadline {
+                            window_probe = !tcb.send_buffer.is_empty();
+                            let d = Duration::from_nanos(
+                                tcb.persist_backoff.as_nanos().saturating_mul(2),
+                            );
+                            tcb.persist_backoff = d.min(Duration::from_secs(60));
+                            tcb.persist_timer = Some(now + tcb.persist_backoff);
+                        }
+                    }
+
+                    keepalive = self.tick_keepalive_timer(&mut tcb, now);
+
+                    if let Some(deadline) = tcb.ack_deadline {
+                        if now >= deadline {
+                            delayed_ack = true;
+                            tcb.ack_deadline = None;
+                            tcb.ack_needed = false;
+                            tcb.unacked_segments = 0;
+                        }
+                    }
+
+                    // Resume paced new-data when the inter-packet gap elapses.
+                    if tcb.pacing.enabled
+                        && !tcb.send_buffer.is_empty()
+                        && tcb.pacing.next_tx.map(|d| now >= d).unwrap_or(true)
+                    {
+                        pacing_release = true;
+                    }
+
+                    if tcb.state == TcpState::TimeWait {
+                        if let Some(dl) = tcb.timewait_deadline {
+                            if now >= dl {
+                                tcb.state = TcpState::Closed;
+                                tcb.event.notify();
+                            }
+                        }
+                    }
+
+                    if tcb.state == TcpState::Closed {
+                        remove_tuples.push(tcb.tuple);
+                    }
+                } // â† per-TCB lock dropped here, before any send
+
+                if delayed_ack {
+                    self.send_immediate_ack_unlocked(tcb_arc);
+                }
+                if retransmit {
+                    self.retransmit_front_unlocked(tcb_arc, RetransmitCause::Rto);
+                }
+                if tlp_fire {
+                    self.tlp_send_probe_unlocked(tcb_arc);
+                }
+                if window_probe {
+                    self.send_window_probe_unlocked(tcb_arc);
+                }
+                if keepalive {
+                    self.send_keepalive_probe_unlocked(tcb_arc);
+                }
+                if pacing_release {
+                    self.process_send_queue(tcb_arc.clone());
+                }
+            }
+
+            if !remove_tuples.is_empty() {
+                // Never nest per-TCB locks while holding `connections` write â€”
+                // that inverts the driver's lock order (connections â†’ tcb)
+                // and can deadlock. `try_write` here means the timer thread
+                // just skips a cycle instead of spinning forever if another
+                // thread is holding a `connections` read guard.
+                if let Some(mut conns) = self.connections.try_write() {
+                    for tuple in remove_tuples {
+                        conns.remove(&tuple);
+                    }
+                }
+            }
+
+            // 20 ms is coarse vs LAN gaps; pacing still prevents full-cwnd bursts.
+            // Optional later: sleep until min(next_tx) across TCBs.
+            current_thread().sleep(Duration::from_millis(20));
+        }
+    }
+
+    fn tick_keepalive_timer(&self, tcb: &mut TcpControlBlock, now: Instant) -> bool {
+        const KEEPALIVE_IDLE: Duration = Duration::from_secs(30);
+        const KEEPALIVE_INTERVAL: Duration = Duration::from_secs(5);
+        const KEEPALIVE_MAX_PROBES: u32 = 3;
+
+        if tcb.state != TcpState::Established {
+            tcb.keepalive_deadline = None;
+            return false;
+        }
+
+        if tcb.keepalive_deadline.is_none() {
+            if now - tcb.last_rx_time >= KEEPALIVE_IDLE {
+                tcb.keepalive_deadline = Some(now);
+            } else {
+                return false;
+            }
+        }
+
+        let deadline = match tcb.keepalive_deadline {
+            Some(d) => d,
+            None => return false,
+        };
+        if now < deadline {
+            return false;
+        }
+
+        if tcb.keepalive_count >= KEEPALIVE_MAX_PROBES {
+            tcb.state = TcpState::Closed;
+            tcb.last_error = Some(TcpError::Timeout);
+            tcb.event.notify();
+            tcb.keepalive_deadline = None;
+            return false;
+        }
+
+        tcb.keepalive_count += 1;
+        tcb.keepalive_deadline = Some(now + KEEPALIVE_INTERVAL);
+        true
+    }
+
+    fn send_keepalive_probe_unlocked(&self, tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        let (socket, mut hdr, opts, tos) = {
+            let mut tcb = tcb_arc.write();
+            let mut hdr = TcpDatagramHeader::new(&tcb);
+            hdr.set_flag(TcpDatagramHeader::ACK, true);
+            hdr.set_sequence_number(tcb.snd_nxt.wrapping_sub(1));
+            let (opts, _) = Self::established_outgoing_options(&mut tcb);
+            let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &[]);
+            (tcb.socket.clone(), hdr, opts, tos)
+        };
+        self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &[], tos);
+    }
+
+    fn send_window_probe_unlocked(&self, tcb_arc: &Arc<IrqGuardedRwLock<TcpControlBlock>>) {
+        let packet = {
+            let mut tcb = tcb_arc.write();
+            if tcb.send_buffer.is_empty() {
+                None
+            } else {
+                let probe = [tcb.send_buffer[0]];
+                let mut hdr = TcpDatagramHeader::new(&tcb);
+                hdr.set_flag(TcpDatagramHeader::ACK, true);
+                hdr.set_acknowledgement_number(tcb.rcv_nxt);
+                hdr.set_sequence_number(tcb.snd_nxt);
+                let (opts, _) = Self::established_outgoing_options(&mut tcb);
+                let tos = Self::apply_outgoing_ecn(&mut tcb, &mut hdr, &probe);
+                Some((tcb.socket.clone(), hdr, probe, opts, tos))
+            }
+        };
+        if let Some((socket, mut hdr, probe, opts, tos)) = packet {
+            self.net_send_tcp_datagram_with_options(socket, &mut hdr, &opts, &probe, tos);
+        }
+    }
+}
+
+extern "C" fn tcp_worker(_arg: u64) -> ! {
+    kernel_ref().network_subsystem().tcp().tcp_timer_thread();
+}

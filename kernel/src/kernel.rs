@@ -23,6 +23,16 @@ use crate::{
         acpi::{Acpi, Device, MadtEntryInner, create_device_list},
         apic::Apic,
         hv::hyperv::{HyperV, synthetic_device::integration::socket::VmBusSocket},
+        net::{
+            Ipv4RoutingTable, MacAddress, NetworkInterface, NetworkInterfaceId,
+            NetworkInterfaceTable, NextHop, RxProcessThread,
+            nic::rtl8139::Rtl8139,
+            proto::{
+                PacketAllocator, arp::ArpDriver, dhcp::DhcpDriver, dns::DnsDriver,
+                ethernet::EthernetDriver, icmp::IcmpDriver, ip::Ipv4Driver, tcp::TcpDriver,
+                udp::UdpDriver,
+            },
+        },
         pci::{Pci, PciDevice},
         pic::ProgrammableInterruptController,
         serial::{Serial, SerialPort},
@@ -42,6 +52,7 @@ use crate::{
             Status, Thread, ThreadInner, ThreadStack,
         },
         scheduler::{self, Scheduler},
+        sync::{IrqGuardedMutex, IrqGuardedRwLock},
         terminal::Terminal,
     },
 };
@@ -63,6 +74,129 @@ impl VirtualizedDevicesManager {
     }
 }
 
+pub struct NetworkSubsystem {
+    interfaces: NetworkInterfaceTable,
+    rx_process_thread: RxProcessThread,
+
+    packet_allocator: IrqGuardedRwLock<PacketAllocator>,
+
+    routing_table: IrqGuardedRwLock<Ipv4RoutingTable<NextHop>>,
+
+    ethernet_driver: EthernetDriver,
+    arp_driver: ArpDriver,
+    ipv4_driver: Ipv4Driver,
+    icmp_driver: IcmpDriver,
+    udp_driver: UdpDriver,
+    tcp_driver: TcpDriver,
+    dhcp_driver: DhcpDriver,
+    dns_driver: DnsDriver,
+
+    interface_address_ready: scheduler::Event,
+    rx_worker_active: AtomicBool,
+}
+
+impl NetworkSubsystem {
+    pub fn new() -> Self {
+        Self {
+            interfaces: NetworkInterfaceTable::new(NetworkInterface {
+                interface_id: NetworkInterfaceId(0),
+                local_internet_address: None,
+                local_mac_address: MacAddress([0u8; 6]),
+                nic: None,
+            }),
+            rx_process_thread: RxProcessThread::new(),
+            packet_allocator: IrqGuardedRwLock::new(PacketAllocator::new()),
+            routing_table: IrqGuardedRwLock::new(Ipv4RoutingTable::new()),
+            ethernet_driver: EthernetDriver::new(),
+            arp_driver: ArpDriver::new(),
+            ipv4_driver: Ipv4Driver::new(),
+            icmp_driver: IcmpDriver::new(),
+            udp_driver: UdpDriver::new(),
+            tcp_driver: TcpDriver::new(),
+            dhcp_driver: DhcpDriver::new(),
+            dns_driver: DnsDriver::new(),
+            interface_address_ready: scheduler::Event::new(),
+            rx_worker_active: AtomicBool::new(false),
+        }
+    }
+
+    pub fn rx_worker_active(&self) -> bool {
+        self.rx_worker_active.load(Ordering::Acquire)
+    }
+
+    pub fn set_rx_worker_active(&self, active: bool) {
+        self.rx_worker_active.store(active, Ordering::Release);
+    }
+
+    pub fn interface_address_ready(&self) -> scheduler::Event {
+        self.interface_address_ready.clone()
+    }
+
+    pub fn notify_interface_address_ready(&self) {
+        self.interface_address_ready.notify();
+    }
+
+    pub fn interfaces(&self) -> &NetworkInterfaceTable {
+        &self.interfaces
+    }
+
+    pub fn packet_allocator(&self) -> &IrqGuardedRwLock<PacketAllocator> {
+        &self.packet_allocator
+    }
+
+    pub fn routing_table(&self) -> &IrqGuardedRwLock<Ipv4RoutingTable<NextHop>> {
+        &self.routing_table
+    }
+
+    pub fn ethernet(&self) -> &EthernetDriver {
+        &self.ethernet_driver
+    }
+
+    pub fn arp(&self) -> &ArpDriver {
+        &self.arp_driver
+    }
+
+    pub fn ipv4(&self) -> &Ipv4Driver {
+        &self.ipv4_driver
+    }
+
+    pub fn icmp(&self) -> &IcmpDriver {
+        &self.icmp_driver
+    }
+
+    pub fn udp(&self) -> &UdpDriver {
+        &self.udp_driver
+    }
+
+    pub fn rx_process_thread(&self) -> &RxProcessThread {
+        &self.rx_process_thread
+    }
+
+    pub fn hardware_rx_pending(&self) -> bool {
+        let mut pending = false;
+        self.interfaces.for_each_nic(|nic| {
+            if !pending && nic.has_pending_rx() {
+                pending = true;
+            }
+        });
+        pending
+    }
+
+    pub fn flush_nic_deferred_tx(&self) {}
+
+    pub fn tcp(&self) -> &TcpDriver {
+        &self.tcp_driver
+    }
+
+    pub fn dhcp(&self) -> &DhcpDriver {
+        &self.dhcp_driver
+    }
+
+    pub fn dns(&self) -> &DnsDriver {
+        &self.dns_driver
+    }
+}
+
 static KERNEL: Kernel = Kernel::new();
 
 pub struct Kernel {
@@ -72,6 +206,7 @@ pub struct Kernel {
     pub kernel_page_table_physical_address: Once<u64>,
 
     pub memory_manager: Once<RwLock<MemoryManager>>,
+    pub network_subsystem: Once<NetworkSubsystem>,
 
     pub bsp_stack: Once<u64>,
     pub gdt: Once<DescriptorTablePointer>,
@@ -108,6 +243,7 @@ impl Kernel {
             kernel_page_table_physical_address: Once::new(),
 
             memory_manager: Once::new(),
+            network_subsystem: Once::new(),
 
             bsp_stack: Once::new(),
             gdt: Once::new(),
@@ -211,6 +347,10 @@ impl Kernel {
         self.platform_devices.pic.lock().initialize();
     }
 
+    pub(crate) fn initialize_networking(&self) {
+        self.network_subsystem.call_once(|| NetworkSubsystem::new());
+    }
+
     #[inline(always)]
     pub(crate) fn initialize_acpi(&self) {
         self.platform_devices
@@ -235,13 +375,37 @@ impl Kernel {
     }
 
     pub(crate) fn initialize_devices(&self) {
-        /*self.pci_devices
-        .iter()
-        .filter(|dev| dev.device_id == 0x8139)
-        .for_each(|dev| {
-            let mut rtl8139 = Rtl8139::new(Arc::new(Mutex::new(dev)));
+        let rtl_devices = {
+            let mut pci_devices = self.pci_devices.lock();
+            let (rtl, keep): (Vec<_>, Vec<_>) = pci_devices
+                .drain(..)
+                .partition(|dev| dev.device_id == 0x8139);
+
+            *pci_devices = keep;
+            rtl
+        };
+
+        for dev in rtl_devices {
+            let mut rtl8139 = Rtl8139::new(Arc::new(IrqGuardedMutex::new(dev)));
             rtl8139.initialize();
-        });*/
+
+            let mac = rtl8139.mac_address();
+            let interface = NetworkInterface {
+                interface_id: NetworkInterfaceId(0),
+                local_mac_address: mac,
+                local_internet_address: None,
+                nic: Some(Arc::new(rtl8139.clone()) as Arc<dyn crate::driver::net::NetworkCard>),
+            };
+
+            let interface_id = self
+                .network_subsystem()
+                .interfaces()
+                .insert(interface)
+                .expect("failed to register RTL8139 in interface table");
+
+            rtl8139.set_interface_id(interface_id);
+            log::info!("RTL8139 registered: iface={} mac={:?}", interface_id.0, mac);
+        }
     }
 
     pub(crate) fn initialize_kernel_process(&self) {
@@ -459,6 +623,19 @@ impl Kernel {
         self.clock
             .get()
             .expect("clock was accessed before being initialized")
+    }
+
+    #[inline(always)]
+    pub fn network_subsystem(&self) -> &NetworkSubsystem {
+        self.network_subsystem.get().unwrap()
+    }
+
+    pub fn spawn_network_service_threads(&self) {
+        let ns = self.network_subsystem();
+        crate::driver::net::spawn_rx_worker();
+        ns.dhcp().initialize();
+        ns.dns().initialize();
+        ns.tcp().initialize();
     }
 
     #[inline(always)]

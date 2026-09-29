@@ -250,7 +250,7 @@ pub(crate) fn mark_as_response(data_ptr: *const u8) {
 /// Decodes a UTF-16 Little Endian (UTF-16LE) byte buffer into a standard Rust [`String`].
 pub(crate) fn decode_utf16_buf(buf: &[u8]) -> String {
     decode_utf16(
-        buf.chunks_exact(2)
+        buf.as_chunks::<2>().0.iter()
             .map(|c| u16::from_le_bytes([c[0], c[1]]))
             .take_while(|&u| u != 0),
     )

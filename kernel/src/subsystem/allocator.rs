@@ -14,7 +14,7 @@ use crate::subsystem::memory::{
 };
 
 pub(crate) const HEAP_START: usize = 0xffffffff82220000;
-const INITIAL_HEAP_SIZE: usize = 16 * 1024 * 1024;
+const INITIAL_HEAP_SIZE: usize = 64 * 1024 * 1024;
 
 #[global_allocator]
 static ALLOCATOR: KernelHeapAllocator = KernelHeapAllocator::empty();

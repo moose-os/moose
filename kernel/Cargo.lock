@@ -323,6 +323,7 @@ dependencies = [
  "monocle-protocol",
  "phf",
  "pic8259",
+ "pretty-hex",
  "raw-cpuid 11.6.0",
  "snafu",
  "spin 0.12.0",
@@ -488,6 +489,12 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
+
+[[package]]
+name = "pretty-hex"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a65843dfefbafd3c879c683306959a6de478443ffe9c9adf02f5976432402d7"
 
 [[package]]
 name = "prettyplease"

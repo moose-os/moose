@@ -95,7 +95,7 @@ impl Thread {
         // @TODO: Better timers distribution?
         let _ = ProcessorControlBlock::current()
             .hr_timers
-            .get_mut()
+            .write()
             .add_timer(
                 expires,
                 false,

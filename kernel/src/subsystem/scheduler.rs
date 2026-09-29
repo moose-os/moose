@@ -8,7 +8,7 @@ use core::{
 use spin::Mutex;
 use x86_64::{
     PhysAddr,
-    instructions::interrupts,
+    instructions::interrupts::{self, without_interrupts},
     registers::control::{Cr3, Cr3Flags},
     structures::paging::{PhysFrame, Size4KiB},
 };
@@ -50,7 +50,7 @@ impl Scheduler {
 
         ProcessorControlBlock::current()
             .hr_timers
-            .get_mut()
+            .write()
             .add_timer(
                 expires,
                 true,
@@ -241,6 +241,10 @@ impl Event {
 
         waiting_threads.clear();
     }
+
+    pub fn clear_pending(&self) {
+        self.0.waiting_threads.lock().clear();
+    }
 }
 
 struct EventInner {
@@ -259,6 +263,18 @@ pub fn current_thread() -> Thread {
 
 pub fn has_current_thread() -> bool {
     kernel_ref().scheduler.current_thread.lock().is_some()
+}
+
+pub fn block_on_event(event: &Event) {
+    loop {
+        without_interrupts(|| event.wait_on(&current_thread()));
+
+        yield_to_scheduler();
+
+        if current_thread().status() != Status::Waiting {
+            break;
+        }
+    }
 }
 
 pub fn schedule(thread: Thread) {

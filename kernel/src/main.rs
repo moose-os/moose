@@ -20,6 +20,7 @@ mod subsystem;
 
 use alloc::{boxed::Box, sync::Arc};
 
+use pretty_hex::PrettyHex;
 use raw_cpuid::{CpuId, Hypervisor};
 
 use crate::{
@@ -46,6 +47,7 @@ use crate::{
                 run_loop::run_guest_loop,
             },
         },
+        net::{Ipv4Addr, NetworkInterfaceId, proto::tcp::TcpSessionSettings},
         serial::SerialPort,
     },
     kernel::{VirtualizedDevicesManager, kernel_ref},
@@ -53,7 +55,7 @@ use crate::{
         logger::init_logger,
         monocle_logger::{MonocleLogger, monocle_logger, try_register},
         process::DEFAULT_THREAD_PRIORITY,
-        scheduler::Scheduler,
+        scheduler::{Scheduler, block_on_event, yield_to_scheduler},
     },
 };
 
@@ -125,11 +127,15 @@ unsafe extern "C" fn _start() -> ! {
     info!("Initializing clock...");
     kernel.initialize_clock();
 
-    info!("Initializing devices...");
-    kernel.initialize_devices();
-
     info!("Spawning kernel processes...");
     kernel.initialize_kernel_process();
+
+    info!("Initializing networking...");
+    kernel.initialize_networking();
+    kernel.spawn_network_service_threads();
+
+    info!("Initializing devices...");
+    kernel.initialize_devices();
 
     info!("Enabling application processors...");
     kernel
@@ -158,10 +164,108 @@ unsafe extern "C" fn _start() -> ! {
             .unwrap();
     }
 
+    spawn_tcp_demo_threads();
+
     enable_interrupts();
 
     info!("Scheduling...");
     Scheduler::run();
+}
+
+pub(crate) fn spawn_tcp_demo_threads() {
+    kernel_ref()
+        .spawn_kernel_thread(http_google_demo_thread, 0, 7)
+        .expect("HTTP demo thread");
+}
+
+extern "C" fn http_google_demo_thread(_arg: u64) -> ! {
+    receive_server();
+}
+
+/// Waits until the interface has a non-zero DHCP address.
+fn wait_for_interface_ip(nic: NetworkInterfaceId) -> Ipv4Addr {
+    let ns = kernel_ref().network_subsystem();
+    let ready = ns.interface_address_ready();
+
+    loop {
+        if let Some(ip) = ns
+            .interfaces()
+            .get(nic)
+            .and_then(|iface| iface.local_internet_address)
+            && ip != Ipv4Addr::unspecified()
+        {
+            return ip;
+        }
+
+        block_on_event(&ready);
+    }
+}
+
+fn receive_server() -> ! {
+    let nic = NetworkInterfaceId(0);
+    let tcp = kernel_ref().network_subsystem().tcp();
+
+    let local_ip = wait_for_interface_ip(nic);
+    info!("HTTP demo: local address {}", local_ip);
+
+    let remote = Ipv4Addr::new([192, 168, 50, 2]);
+    let mut opts = TcpSessionSettings {
+        recv_buf_size: 65536,
+        nagle_enabled: false,
+        ..TcpSessionSettings::default()
+    };
+
+    info!("HTTP demo: connecting to {}:8888", remote);
+
+    let tcb = match tcp.connect(nic, local_ip, 0, remote, 8888, &mut opts) {
+        Ok(tcb) => tcb,
+        Err(err) => {
+            log::error!("HTTP demo: connect failed: {:?}", err);
+
+            loop {
+                yield_to_scheduler();
+            }
+        }
+    };
+
+    let sock = tcp.socket_create();
+    if let Err(err) = tcp.socket_adopt_connected(sock, tcb) {
+        log::error!("HTTP demo: socket adopt failed: {:?}", err);
+
+        loop {
+            yield_to_scheduler();
+        }
+    }
+
+    info!("HTTP demo: connected");
+
+    let mut buf = [0u8; 4096];
+    let mut total = 0usize;
+
+    loop {
+        match tcp.socket_recv(sock, &mut buf) {
+            Ok(0) => {
+                info!("receive_server: peer closed (EOF)");
+                break;
+            }
+            Ok(n) => {
+                total += n;
+
+                info!("{:?}", buf[..n].hex_dump());
+            }
+            Err(err) => {
+                log::error!("receive_server: recv error: {}", err);
+                break;
+            }
+        }
+    }
+
+    let _ = tcp.socket_close(sock);
+    info!("receive_server: finished, {} bytes received", total);
+
+    loop {
+        yield_to_scheduler();
+    }
 }
 
 fn spawn_test_processes() {
